@@ -346,6 +346,22 @@ class Pipeline:
             stage3="checked" if self.defense.stage3_enabled else "skipped",
         )
 
+    def describe_chunk(self, chunk_id: str) -> ChunkTrace | None:
+        """One chunk's ingest verdict and current status, independent of any
+        specific ``ask()`` call -- for a UI's "look up this chunk id" trace
+        view. Checks the live store first (found there = currently
+        searchable), then the quarantine queue (still held, or held-then-
+        released history) -- the same two places ``ingest()``/``release()``
+        themselves write to -- and returns None only if the id is unknown to
+        both."""
+        stored = self.store.get(chunk_id)
+        if stored is not None:
+            return self._trace_for(chunk_id, stored.tenant, retrieved=True, entered_prompt=False)
+        entry = self.quarantine.get(chunk_id)
+        if entry is not None:
+            return self._trace_for(chunk_id, entry.chunk.tenant, retrieved=False, entered_prompt=False)
+        return None
+
     def ask(
         self, question: str, scope: Scope, k: int = 5, *,
         min_results: int = 1, min_score: float | None = None,

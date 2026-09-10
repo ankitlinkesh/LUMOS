@@ -372,16 +372,68 @@ python -m triad.eval.report                                           # collate 
 
 ```
 python -m triad.api            # fake demo service, for UI development
-python -m triad.api --real     # the real pipeline
+python -m triad.api --real     # the real pipeline, real Groq calls, live Enron/LLMail-Inject corpus
 ```
 
-The UI is a React + Vite build served offline as static files by the same FastAPI app — **no second
-code path**. When the backend does not positively confirm it is serving real data, the page shows a
-sticky amber **"DEMO MODE — FAKE DATA, NOT MEASURED RESULTS"** banner, so a screenshot can never be
-mistaken for a measurement.
+Both commands above were run exactly as written and driven with `curl` against every `/api/*`
+route (not just checked via the test suite — a green suite here has previously proven storage
+without proving arrival).
 
-`triad/api/real_adapter.py` is **not finished**: only `meta()` is implemented, the rest raise
-`NotImplementedError`. Wiring it to `Pipeline.demo()` is the remaining task.
+The UI is a React + Vite build served offline as static files by the same FastAPI app — **no second
+code path**. The banner is driven by `ui/src/App.tsx`: `showDemoBanner = meta?.service !== "real"`,
+fail-safe in the "still shown" direction — it stays on until `GET /api/meta` *positively* returns
+`"real"`, so a slow/failed fetch never accidentally shows real data unbannered. `--real` now
+constructs the actual Groq client and the real `Pipeline.demo()` corpus *before* the server starts
+serving; if that build fails for any reason (no/invalid keys, etc.) the process prints the cause and
+exits — it never starts with the banner off and endpoints 500ing. Confirmed both directions:
+
+```
+$ python -m triad.api            # then: curl /api/meta
+{"service":"fake","data_source":"synthetic", ...}
+
+$ python -m triad.api --real     # then: curl /api/meta
+{"service":"real","data_source":"real","note":"Live pipeline output."}
+
+$ GROQ_API_KEYS=not_a_valid_key python -m triad.api --real
+error: --real could not build a working pipeline, so refusing to start ...
+  cause: ValueError: malformed key at GROQ_API_KEYS line 1: does not start with 'gsk_'
+(exit code 1 — no server, nothing to accidentally show unbannered)
+```
+
+`triad/api/real_adapter.py` is now fully wired to the real `Pipeline` (all seven `DemoService`
+methods; `meta()` was the only one implemented before). Driven live end to end on the real EnronQA
+corpus (6 tenants, real Stage 1 quarantine, real Groq generation):
+
+- `/api/ask` — real `SecureRetriever`/`LeakyRetriever` retrieval + a real Groq chat completion.
+  Disk cache confirmed working (`"cached": true` on a repeated identical call).
+- `/api/tenants`, `/api/quarantine`, `/api/probe`, `/api/trace/{id}` — all backed by the live
+  `TenantStore`/`QuarantineQueue`, not synthetic data. `probe`'s `property_test` is a genuine
+  30-retrieval regression check against the live store on every call (`fake: false`), not a
+  hardcoded pass count.
+- **Bug found and fixed while driving this live:** real EnronQA chunk/quarantine ids look like
+  `allen-p/all_documents/423.` — they contain `/`. FastAPI's default path parameter can't match a
+  `/` inside one segment, so `GET /api/trace/{id}` and `POST /api/quarantine/{id}/release` 404'd
+  for every real id even though the adapter itself was correctly wired; the demo service's
+  slash-free canned ids never exposed this. Fixed in `triad/api/app.py` with the `:path` converter
+  (`{chunk_id:path}`, `{item_id:path}`); the frontend already sent `encodeURIComponent(id)`, so no
+  UI change was needed. Regression-tested in `tests/test_api_endpoints_real.py`.
+- **Known gap, not hidden:** on this real corpus, a defended (`defense: true`) `/api/ask` call
+  sometimes shows a `retrieve`/`blocked` trace line reading `internal error while collapsing
+  near-duplicate clusters: TypeError: can only concatenate str (not "list") to str`. That is a real
+  exception inside `triad/stage1/geometry.py`'s `collapse_topk` on real Enron text, caught by its
+  own fail-closed `except Exception` (so the request still returns 200 with a genuine, uncorrupted
+  answer — nothing is fabricated or hidden), surfaced honestly in the trace rather than swallowed.
+  Not fixed here: it is Stage 1B's own code, outside `real_adapter.py`'s scope.
+
+`/api/results` reads **only** from an explicit filename allowlist in `real_adapter.py`
+(`_VALID_RESULT_FILES`), never a directory glob. Of the files in `results/`, four are the vetted
+headline runs; two of those four produce a `ResultRow` (PoisonedRAG n=100, cross-tenant leak n=500);
+the other two (`geometry_...json`, `injection_...json`) are real and vetted but contain no
+added-latency measurement, so they deliberately produce no row rather than a fabricated one — see
+the comment above `_VALID_RESULT_FILES` for the full reasoning. Everything else in `results/`
+(the four known-invalid smoke/retry runs, plus any file never individually vetted for this table)
+is invisible to `/api/results` by construction, not by being individually excluded. Confirmed live:
+`GET /api/results` on the real server returns exactly those 2 rows, both `"fake": false`.
 
 ## Layout
 

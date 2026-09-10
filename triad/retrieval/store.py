@@ -224,3 +224,16 @@ class TenantStore:
 
     def count(self) -> int:
         return self._collection.count()
+
+    def tenant_counts(self) -> dict[str, int]:
+        """Distinct tenants currently in this store, and how many chunks each
+        owns. Reads the same underlying collection ``search``/``get`` already
+        use (``include=["metadatas"]``, no query vector or id filter) rather
+        than tracking counts separately, so this can never drift from what is
+        actually stored. Used by the API's tenant picker."""
+        result = self._collection.get(include=["metadatas"])
+        counts: dict[str, int] = {}
+        for meta in result["metadatas"]:
+            tenant = meta["tenant"]
+            counts[tenant] = counts.get(tenant, 0) + 1
+        return counts

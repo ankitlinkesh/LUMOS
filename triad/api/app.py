@@ -54,7 +54,7 @@ def create_app(service: DemoService) -> FastAPI:
     def get_quarantine():
         return [serialize.quarantine_dict(q) for q in service.list_quarantine()]
 
-    @app.post("/api/quarantine/{item_id}/release")
+    @app.post("/api/quarantine/{item_id:path}/release")
     def post_release(item_id: str):
         released = service.release_quarantine(item_id)
         if not released:
@@ -66,7 +66,7 @@ def create_app(service: DemoService) -> FastAPI:
         result = service.probe(as_tenant=body.as_tenant, target_tenant=body.target_tenant)
         return serialize.probe_dict(result)
 
-    @app.get("/api/trace/{chunk_id}")
+    @app.get("/api/trace/{chunk_id:path}")
     def get_trace(chunk_id: str):
         steps = service.trace_for_chunk(chunk_id)
         if steps is None:

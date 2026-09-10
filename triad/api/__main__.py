@@ -21,7 +21,7 @@ def main() -> None:
 
     if args.real:
         try:
-            from triad.pipeline import Pipeline  # noqa: F401
+            from triad.pipeline import Pipeline
         except ImportError as exc:
             print(
                 "error: --real requires triad.pipeline.Pipeline, which does not exist "
@@ -34,8 +34,35 @@ def main() -> None:
             )
             raise SystemExit(1) from exc
 
+        # Building a genuinely working real pipeline needs a real LLM client
+        # too -- Pipeline.ask() raises if llm is None. Constructing that here
+        # (and refusing to start on any failure) is what keeps the promise in
+        # real_adapter.py's meta(): the "DEMO MODE -- FAKE DATA" banner is OFF
+        # in --real mode, so it must never be OFF while endpoints 500 because
+        # the LLM, or the demo corpus build, never actually came up.
+        try:
+            from triad.llm.cache import DiskCache
+            from triad.llm.client import GroqClient
+            from triad.llm.keys import load_keys
+            from triad.llm.limiter import RateLimiter
+
+            keys = load_keys()
+            llm = GroqClient(keys=keys, limiter=RateLimiter(), cache=DiskCache())
+            pipeline = Pipeline.demo(llm=llm)
+        except Exception as exc:
+            print(
+                "error: --real could not build a working pipeline, so refusing to "
+                "start (never serves with the DEMO MODE banner off and broken "
+                "endpoints).\n"
+                f"  cause: {type(exc).__name__}: {exc}\n"
+                "  Run `python -m triad.api` without --real to use the fake demo "
+                "service instead.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from exc
+
         from triad.api.real_adapter import RealDemoService
-        service = RealDemoService(Pipeline.demo())
+        service = RealDemoService(pipeline)
     else:
         from triad.api.service import FakeDemoService
         service = FakeDemoService()
