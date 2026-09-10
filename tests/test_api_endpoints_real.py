@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from triad.api.app import create_app
 from triad.api.real_adapter import RealDemoService
 from triad.contract import Chunk, Provenance
+from triad.data.types import QARecord
 from triad.embed.hash_embedder import HashEmbedder
 from triad.pipeline import Pipeline
 from triad.quarantine import QuarantineQueue
@@ -50,7 +51,18 @@ def make_client(tmp_path) -> TestClient:
         make_chunk("alice/inbox/1.", "alice", "meeting notes with a slash-bearing id"),
         make_chunk("alice/deleted_items/2.", "alice", _DIRECTIVE_TRIGGER),
     ])
-    service = RealDemoService(pipeline)
+
+    def qa_loader(target_tenant):
+        if target_tenant != "alice":
+            return []
+        return [QARecord(
+            question="what is the quarterly budget review meeting about?",
+            gold_answers=("an answer",), incorrect_answers=(),
+            email_path="c-alice-1", tenant="alice",
+            provenance=Provenance("test", "c-alice-1#qa", "synthetic"),
+        )]
+
+    service = RealDemoService(pipeline, qa_loader=qa_loader)
     app = create_app(service)
     return TestClient(app)
 
@@ -81,10 +93,13 @@ def test_ask_defended_shape(client):
     body = r.json()
     assert set(body.keys()) == {
         "answer", "declined", "decline_reason", "leak_mode", "latency_ms",
-        "chunks", "trace", "cached", "data_source",
+        "chunks", "trace", "cached", "data_source", "n_chunks_real", "n_chunks_synthetic",
     }
     assert body["leak_mode"] is False
     assert body["data_source"] == "mixed"
+    # This fixture's chunks all carry Provenance("test", ..., "synthetic").
+    assert body["n_chunks_real"] == 0
+    assert body["n_chunks_synthetic"] == len(body["chunks"])
     for e in body["trace"]:
         assert e["stage"] in {"ingest", "retrieve", "prompt", "egress"}
 
@@ -107,8 +122,21 @@ def test_probe_shape(client):
     r = client.post("/api/probe", json={"as_tenant": "alice", "target_tenant": "alice"})
     assert r.status_code == 200
     body = r.json()
-    assert set(body.keys()) == {"secure", "leaky", "property_test"}
+    assert set(body.keys()) == {
+        "secure", "leaky", "property_test", "query", "target_gold_chunk_id", "gold_leaked",
+    }
     assert body["property_test"] is None
+    assert body["query"] == "what is the quarterly budget review meeting about?"
+    assert body["target_gold_chunk_id"] == "c-alice-1"
+
+
+def test_probe_422s_when_target_tenant_has_no_usable_document(client):
+    # "bob" has no entry in this test's qa_loader -- the probe must fail
+    # loudly (422, reason surfaced), never silently fall back to a generic
+    # query.
+    r = client.post("/api/probe", json={"as_tenant": "alice", "target_tenant": "bob"})
+    assert r.status_code == 422
+    assert "bob" in r.json()["detail"]
 
 
 def test_trace_known_and_unknown(client):

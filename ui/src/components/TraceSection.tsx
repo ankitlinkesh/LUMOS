@@ -19,8 +19,8 @@ const STAGE_LABEL: Record<ChunkTraceStep["stage"], string> = {
 
 function statusVariant(status: string): "neutral" | "red" | "green" | "amber" {
   if (["quarantined", "blocked", "skipped"].includes(status)) return "red";
-  if (["clean", "eligible", "used", "included"].includes(status)) return "green";
-  if (status === "paused") return "amber";
+  if (["clean", "eligible", "used", "included", "enabled"].includes(status)) return "green";
+  if (status === "disabled") return "amber";
   return "neutral";
 }
 

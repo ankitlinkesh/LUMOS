@@ -46,7 +46,14 @@ export interface AskResponse {
   chunks: ScoredChunk[];
   trace: TraceEvent[];
   cached: boolean;
+  // Corpus-level, conservative label: could a synthetic chunk have been
+  // retrieved at all (see the README's Demo UI section for why "mixed" and
+  // "real" coexist). n_chunks_real/n_chunks_synthetic is the per-response
+  // fact -- of the chunks THIS call actually retrieved, how many really
+  // are which.
   data_source: "real" | "mixed";
+  n_chunks_real: number;
+  n_chunks_synthetic: number;
 }
 
 export interface QuarantineItem {
@@ -69,6 +76,13 @@ export interface ProbeResponse {
   secure: ProbeSide;
   leaky: ProbeSide;
   property_test: { passed: number; total: number; fake: boolean } | null;
+  // The query the probe actually ran, always derived from target_tenant's
+  // own content -- never a fixed generic string. gold_leaked is the strong
+  // claim: the SPECIFIC chunk this query was built to be answerable from
+  // came back on the leaky side for a different requester.
+  query: string;
+  target_gold_chunk_id: string | null;
+  gold_leaked: boolean;
 }
 
 export interface ChunkTraceStep {

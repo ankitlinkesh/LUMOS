@@ -126,6 +126,17 @@ export default function ProbeSection({
         {state.status === "error" && <ErrorBox message={state.message} onRetry={fire} />}
         {state.status === "ok" && (
           <>
+            <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+              <span className="font-semibold">Query (derived from {targetTenant}'s own content):</span>{" "}
+              <span className="italic">&ldquo;{state.data.query}&rdquo;</span>
+              {state.data.gold_leaked && (
+                <span className="ml-2">
+                  <Badge variant="red" title="The exact chunk this query was built to be answerable from came back for a different requester">
+                    gold chunk leaked
+                  </Badge>
+                </span>
+              )}
+            </div>
             <div className="flex flex-col gap-6 lg:flex-row">
               <ProbeSideCard
                 label="Secure (defended)"

@@ -77,6 +77,8 @@ def ask_dict(r: AskResult) -> dict:
         ],
         "cached": r.cached,
         "data_source": r.data_source,
+        "n_chunks_real": r.n_chunks_real,
+        "n_chunks_synthetic": r.n_chunks_synthetic,
     }
 
 
@@ -113,6 +115,9 @@ def probe_dict(r: ProbeResult) -> dict:
             if r.property_test is not None
             else None
         ),
+        "query": r.query,
+        "target_gold_chunk_id": r.target_gold_chunk_id,
+        "gold_leaked": r.gold_leaked,
     }
 
 

@@ -29,6 +29,7 @@ __all__ = [
     "ProbeSide",
     "PropertyTestResult",
     "ProbeResult",
+    "NoUsableTargetDocument",
     "ChunkTraceStep",
     "ResultRow",
     "ServiceMeta",
@@ -75,7 +76,16 @@ class AskResult:
     chunks: tuple[ScoredChunk, ...]
     trace: tuple[TraceEvent, ...]
     cached: bool
-    data_source: str  # "real" | "mixed"
+    data_source: str  # "real" | "mixed" -- corpus-level: could a synthetic
+    # chunk have been retrieved at all (the conservative truth). The two
+    # counts below are the per-response fact -- of the chunks THIS call
+    # actually retrieved, how many really are which -- read straight off
+    # each chunk's own Provenance.data_source, never a second guess at it.
+    # n_chunks_real + n_chunks_synthetic always equals len(chunks) (both are
+    # 0 for a declined/empty retrieval, which is not the same claim as
+    # "0% synthetic").
+    n_chunks_real: int
+    n_chunks_synthetic: int
 
 
 @dataclass(frozen=True)
@@ -108,6 +118,34 @@ class ProbeResult:
     secure: ProbeSide
     leaky: ProbeSide
     property_test: PropertyTestResult | None
+    # The query the probe actually ran -- always derived from target_tenant's
+    # own content (see real_adapter.py's probe()), never the old fixed
+    # generic string. target_gold_chunk_id is the specific chunk that query
+    # was built to be answerable from; gold_leaked is True only when that
+    # EXACT chunk (not just "some foreign chunk") came back on the leaky
+    # side -- the strongest form of "tenant isolation failed on a query
+    # aimed at B's content." Defaulted so FakeDemoService need not change
+    # its call sites' positional shape.
+    query: str = ""
+    target_gold_chunk_id: str | None = None
+    gold_leaked: bool = False
+
+
+class NoUsableTargetDocument(Exception):
+    """Raised by DemoService.probe() when target_tenant has no document that
+    both (a) is actually indexed in the live store and (b) has a matching
+    real question to build a target-specific probe query from. Never caught
+    to silently fall back to a generic query -- that reintroduces the exact
+    bug this exception exists to prevent (a probe that doesn't test what
+    target_tenant shapes). Callers (app.py) turn this into a 422, not a 500,
+    since it is a precondition failure the caller can act on (pick a
+    different target_tenant), not an internal error."""
+
+    def __init__(self, target_tenant: str) -> None:
+        super().__init__(
+            f"no usable document to build a target-specific probe query for tenant {target_tenant!r}"
+        )
+        self.target_tenant = target_tenant
 
 
 @dataclass(frozen=True)
@@ -292,7 +330,11 @@ class FakeDemoService:
                            "scope check skipped; foreign tenant-x chunk returned"),
                 TraceEvent(self._poison.id, "prompt", "followed_directive",
                            "hidden instruction inside the chunk altered the answer"),
-                TraceEvent("-", "egress", "paused", "Stage 3 egress checks are paused in this build"),
+                # Consistent with real_adapter.py's status vocabulary
+                # ("enabled"/"disabled" -- a configuration fact, never
+                # "paused", which reads as unimplemented; Stage 3 is
+                # implemented and measured, see the README).
+                TraceEvent("-", "egress", "disabled", "Stage 3 egress checks are disabled by configuration in this build"),
             )
             answer = (
                 "The real Q3 budget is $9,900,000 (per the latest thread). "
@@ -302,7 +344,7 @@ class FakeDemoService:
             return AskResult(
                 answer=answer, declined=False, decline_reason=None, leak_mode=True,
                 latency_ms=612.0, chunks=chunks, trace=trace, cached=False,
-                data_source="mixed",
+                data_source="mixed", n_chunks_real=0, n_chunks_synthetic=len(chunks),
             )
 
         # Defended path: Stage 1 quarantines the poisoned chunk before it is
@@ -314,7 +356,7 @@ class FakeDemoService:
                        "hidden instruction + exfil address scored 0.94 (>= 0.5 threshold)"),
             TraceEvent(own_doc.id, "retrieve", "included", f"scoped to {tenant}; 1 own chunk matched"),
             TraceEvent(own_doc.id, "prompt", "grounded", "answer generated only from tenant-scoped chunks"),
-            TraceEvent("-", "egress", "paused", "Stage 3 egress checks are paused in this build"),
+            TraceEvent("-", "egress", "disabled", "Stage 3 egress checks are disabled by configuration in this build"),
         )
         answer = (
             f"Based on {tenant}'s own documents: the Q3 operating budget is "
@@ -325,7 +367,7 @@ class FakeDemoService:
         return AskResult(
             answer=answer, declined=False, decline_reason=None, leak_mode=False,
             latency_ms=340.0, chunks=chunks, trace=trace, cached=False,
-            data_source="mixed",
+            data_source="mixed", n_chunks_real=0, n_chunks_synthetic=len(chunks),
         )
 
     # -- quarantine -----------------------------------------------------------
@@ -374,7 +416,18 @@ class FakeDemoService:
 
         property_test = PropertyTestResult(passed=200, total=200, fake=True) if cross_tenant else None
 
-        return ProbeResult(secure=secure, leaky=leaky, property_test=property_test)
+        # Fake but honestly-shaped: a canned "question about target's own
+        # content", matching what the real adapter now actually does (build
+        # the probe query from target_tenant's own document), never the old
+        # fixed generic string.
+        query = f"a question about {target_tenant}'s own document ({(target or own).id})"
+        gold_id = target.id if target is not None else (own.id if not cross_tenant else None)
+        gold_leaked = cross_tenant and target is not None and n_foreign > 0
+
+        return ProbeResult(
+            secure=secure, leaky=leaky, property_test=property_test,
+            query=query, target_gold_chunk_id=gold_id, gold_leaked=gold_leaked,
+        )
 
     # -- trace -----------------------------------------------------------
 
@@ -406,7 +459,7 @@ class FakeDemoService:
                                          "2026-09-10T09:00:01Z"))
             steps.append(ChunkTraceStep("prompt", "used", "included as supporting context",
                                          "2026-09-10T09:00:02Z"))
-        steps.append(ChunkTraceStep("egress", "paused", "Stage 3 egress checks are paused in this build",
+        steps.append(ChunkTraceStep("egress", "disabled", "Stage 3 egress checks are disabled by configuration in this build",
                                      "2026-09-10T09:00:03Z"))
         return steps
 

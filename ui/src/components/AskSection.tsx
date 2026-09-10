@@ -51,7 +51,18 @@ function AnswerPane({
             <div className="mt-3 flex flex-wrap gap-2">
               {state.data.leak_mode && <Badge variant="red">cross-tenant leak</Badge>}
               {state.data.cached && <Badge variant="neutral">cached</Badge>}
-              <Badge variant="neutral">data: {state.data.data_source}</Badge>
+              <Badge
+                variant="neutral"
+                title="Corpus-level label: could a synthetic chunk have been retrieved at all (see README)"
+              >
+                data: {state.data.data_source}
+              </Badge>
+              <Badge
+                variant="neutral"
+                title="Per-response fact: of the chunks THIS call actually retrieved, how many are real vs synthetic"
+              >
+                this answer: {state.data.n_chunks_real} real / {state.data.n_chunks_synthetic} synthetic
+              </Badge>
             </div>
 
             <h3 className="mt-5 text-base font-semibold text-slate-700">

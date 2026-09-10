@@ -103,7 +103,13 @@ export default function App() {
       </main>
 
       <footer className="border-t border-slate-200 bg-slate-50 py-6 text-center text-sm text-slate-500">
-        TRIAD-RAG demo &middot; Stage 3 egress checks are paused in this build
+        {/* Stage 3 is implemented and measured (see the README's "Stage 3 --
+            output and egress" section) but whether it is switched ON for
+            THIS build depends on how the server was started -- never assert
+            a specific state here that this static string can't verify.
+            The Ask/Trace panels' egress step shows the real, current
+            enabled/disabled fact for this build. */}
+        TRIAD-RAG demo &middot; Stage 3 egress checks: see the Ask/Trace panels' egress step for this build&rsquo;s setting
       </footer>
     </div>
   );

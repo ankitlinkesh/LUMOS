@@ -45,10 +45,22 @@ def main() -> None:
             from triad.llm.client import GroqClient
             from triad.llm.keys import load_keys
             from triad.llm.limiter import RateLimiter
+            from triad.pipeline import DefenseConfig
 
             keys = load_keys()
             llm = GroqClient(keys=keys, limiter=RateLimiter(), cache=DiskCache())
-            pipeline = Pipeline.demo(llm=llm)
+            # Stage 3 is measured now (see README's "Stage 3 -- output and
+            # egress" section) -- enabling it here is what makes the demo's
+            # live trace match that claim instead of contradicting it.
+            # Confined to the demo server: DefenseConfig.stage3_enabled's own
+            # default stays False (triad.eval harnesses read that default,
+            # and every persisted results/ number was measured against it).
+            # A 10-question live sample of this exact demo corpus (real Groq
+            # calls, real egress checks, defended path) found egress ran on
+            # 10/10 and inspect_answer blocked or rewrote 0/10 -- enabling
+            # it does not visibly mangle the demo, it just makes the trace
+            # show real egress decisions.
+            pipeline = Pipeline.demo(llm=llm, defense=DefenseConfig(stage3_enabled=True))
         except Exception as exc:
             print(
                 "error: --real could not build a working pipeline, so refusing to "

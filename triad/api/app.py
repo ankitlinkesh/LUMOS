@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from triad.api import serialize
-from triad.api.service import DemoService
+from triad.api.service import DemoService, NoUsableTargetDocument
 
 __all__ = ["create_app", "UI_DIST_DIR"]
 
@@ -63,7 +63,13 @@ def create_app(service: DemoService) -> FastAPI:
 
     @app.post("/api/probe")
     def post_probe(body: ProbeRequest):
-        result = service.probe(as_tenant=body.as_tenant, target_tenant=body.target_tenant)
+        try:
+            result = service.probe(as_tenant=body.as_tenant, target_tenant=body.target_tenant)
+        except NoUsableTargetDocument as exc:
+            # A precondition failure the caller can act on (pick a different
+            # target_tenant) -- never silently degrade to a generic query,
+            # which is exactly the bug this replaces.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return serialize.probe_dict(result)
 
     @app.get("/api/trace/{chunk_id:path}")

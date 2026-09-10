@@ -461,6 +461,59 @@ corpus (6 tenants, real Stage 1 quarantine, real Groq generation):
   answer — nothing is fabricated or hidden), surfaced honestly in the trace rather than swallowed.
   Not fixed here: it is Stage 1B's own code, outside `real_adapter.py`'s scope.
 
+**Three defects found and fixed by driving `--real` live (not caught by the test suite):**
+
+1. **`/api/probe` used to ask a fixed, generic query regardless of `target_tenant`.** `target_tenant`
+   only gated whether the property test ran — the actual retrieval query never depended on it, so a
+   "leak" just meant "the requester's own mail doesn't match a generic string well," not "isolation
+   failed on a query aimed at the target's content." Measured before the fix: only the smallest demo
+   inbox (`bass-e`, 16 docs) ever leaked, on every pair — the requester's own document scarcity, not
+   tenant isolation, was driving the number. Fixed by reusing `triad.eval.tenant_leak`'s own
+   probe-construction predicate (not a second methodology): a real EnronQA test-split question whose
+   gold email belongs to `target_tenant` AND is actually indexed in the live store (`RealDemoService.
+   _target_probe_query`, injectable via a `qa_loader` constructor arg for tests). If no such
+   question/chunk pair exists, `probe()` raises `NoUsableTargetDocument` — `POST /api/probe` maps
+   that to `422` with the reason — rather than silently falling back to the old generic query, which
+   would reintroduce the exact bug. `ProbeResult` gained `query` (the question actually run) and
+   `target_gold_chunk_id`/`gold_leaked` (whether that *specific* chunk — not just any foreign one —
+   came back on the leaky side, the same `leak_gold` definition `tenant_leak.py` measures). Confirmed
+   live over all 30 ordered pairs among the 6 demo tenants: **secure side leaked on 0/30** (the
+   invariant, unchanged); **leaky side leaked on 8/30, spread across normal-sized inboxes** —
+   `allen-p↔arnold-j`, `arnold-j→badeer-r`, `badeer-r→arnold-j`/`bailey-s`/`bass-e`,
+   `bass-e→arora-h`/`badeer-r` — every leaking pair had `gold_leaked: true` (the exact targeted chunk,
+   not incidental noise), and `bass-e` is no longer the only tenant that ever leaks.
+2. **The live trace said Stage 3 was "paused" after Stage 3 had already been measured** (see the
+   section above) — the demo built its pipeline with `DefenseConfig()` defaults, under which
+   `stage3_enabled=False`, and the trace strings said "paused in this build," reading as
+   unimplemented. Decided on evidence, not a guess: built the demo corpus twice (`stage3_enabled`
+   off vs on) and ran the same 10 real questions (real Groq calls) through both. Egress ran on 10/10
+   and `inspect_answer` blocked or rewrote 0/10 — the 43.6% URL false-positive rate measured above
+   didn't bite because none of the 10 sampled answers happened to contain a URL. Two answers differed
+   in wording, traced to `wrap_untrusted`'s prompt fence changing the model's own phrasing, not to
+   `inspect_answer` touching anything — counted separately so a fence-driven wording change is never
+   misattributed to the egress guard. Enabled Stage 3 for the demo server only
+   (`triad/api/__main__.py` now passes `DefenseConfig(stage3_enabled=True)` to `Pipeline.demo()`);
+   `DefenseConfig.stage3_enabled`'s own default stays `False` (the eval harnesses and every persisted
+   `results/` number depend on that default, unchanged). Also fixed a mirror-image overclaim: `GET
+   /api/trace/{id}` isn't tied to any specific `/api/ask` call, so "Stage 3 egress checks ran" was
+   itself a false claim about an event that never happened for that view — both trace endpoints now
+   state a configuration fact instead (`"enabled"`/`"disabled" by configuration in this build`), and
+   `FakeDemoService`'s three hardcoded "paused" strings were brought into the same non-contradictory
+   wording so the fake and real services never disagree about what a judge is looking at.
+3. **`data_source: "mixed"` on `/api/ask` was correct but unexplained next to `meta`'s `"real"`.**
+   The demo corpus mixes real EnronQA/LLMail-Inject records with a synthetic PoisonedRAG-style
+   poison set (see `Pipeline.demo`'s docstring) — `"mixed"` is the conservative, corpus-level truth
+   (a synthetic chunk *could* have been retrieved) and stays exactly as it was. Added the per-response
+   fact alongside it: `AskResult.n_chunks_real`/`n_chunks_synthetic`, computed from the actually-
+   retrieved chunks' own `Provenance.data_source` (never a second guess — `n_real + n_synthetic ==
+   len(chunks)` always, and both are `0` for a declined/empty retrieval, which is not the same claim
+   as "0% synthetic"). Surfaced in the UI next to the existing `data:` badge. Live: ordinary `/api/ask`
+   calls on this demo corpus returned `"n_chunks_real":5,"n_chunks_synthetic":0` — the small planted
+   poison set is small enough, and largely caught by Stage 1 quarantine, that a synthetic chunk
+   surviving into an ordinary answer is the exception rather than the rule; the composition math
+   itself is covered by a dedicated unit test that mixes a real- and synthetic-provenance chunk in
+   one store and asserts the exact 1/1 split.
+
 `/api/results` reads **only** from an explicit filename allowlist in `real_adapter.py`
 (`_VALID_RESULT_FILES`), never a directory glob. Of the files in `results/`, four are the vetted
 headline runs; two of those four produce a `ResultRow` (PoisonedRAG n=100, cross-tenant leak n=500);

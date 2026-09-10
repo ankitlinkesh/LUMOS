@@ -57,7 +57,7 @@ def test_ask_defense_off_shape_and_content():
     body = r.json()
     assert set(body.keys()) == {
         "answer", "declined", "decline_reason", "leak_mode", "latency_ms",
-        "chunks", "trace", "cached", "data_source",
+        "chunks", "trace", "cached", "data_source", "n_chunks_real", "n_chunks_synthetic",
     }
     assert body["leak_mode"] is True
     assert len(body["chunks"]) >= 1
@@ -65,6 +65,9 @@ def test_ask_defense_off_shape_and_content():
         _assert_chunk_shape(c)
     assert any(c["taint"]["quarantined"] for c in body["chunks"]), \
         "the OFF pane should show the poisoned chunk it failed to block"
+    # FakeDemoService's canned chunks are all synthetic.
+    assert body["n_chunks_real"] == 0
+    assert body["n_chunks_synthetic"] == len(body["chunks"])
     for e in body["trace"]:
         assert set(e.keys()) == {"chunk_id", "stage", "event", "detail"}
         assert e["stage"] in {"ingest", "retrieve", "prompt", "egress"}
@@ -111,7 +114,9 @@ def test_probe_shape_secure_vs_leaky():
     r = client.post("/api/probe", json={"as_tenant": "tenant-a", "target_tenant": "tenant-b"})
     assert r.status_code == 200
     body = r.json()
-    assert set(body.keys()) == {"secure", "leaky", "property_test"}
+    assert set(body.keys()) == {
+        "secure", "leaky", "property_test", "query", "target_gold_chunk_id", "gold_leaked",
+    }
     for side_name in ("secure", "leaky"):
         side = body[side_name]
         assert set(side.keys()) == {"leaked", "n_foreign", "declined", "chunks"}
@@ -122,6 +127,8 @@ def test_probe_shape_secure_vs_leaky():
     assert body["secure"]["n_foreign"] == 0
     assert body["leaky"]["leaked"] is True
     assert body["leaky"]["n_foreign"] >= 1
+    assert isinstance(body["query"], str) and body["query"]
+    assert body["gold_leaked"] is True
 
     assert body["property_test"] is not None
     assert set(body["property_test"].keys()) == {"passed", "total", "fake"}
@@ -153,7 +160,7 @@ def test_trace_for_known_chunk():
         assert s["stage"] in {"ingest", "retrieve", "prompt", "egress"}
         stages_seen.append(s["stage"])
     egress_step = next(s for s in steps if s["stage"] == "egress")
-    assert egress_step["status"] == "paused"
+    assert egress_step["status"] == "disabled"
 
 
 def test_trace_for_unknown_chunk_is_404():

@@ -28,6 +28,7 @@ from triad.api import serialize
 from triad.api.service import (
     AskResult,
     ChunkTraceStep,
+    NoUsableTargetDocument,
     ProbeResult,
     ProbeSide,
     PropertyTestResult,
@@ -38,6 +39,8 @@ from triad.api.service import (
     TraceEvent,
 )
 from triad.contract import RetrievalResult
+from triad.data.enronqa import load_qa
+from triad.data.types import QARecord
 from triad.eval._common import RESULTS_DIR
 from triad.pipeline import Answer, ChunkTrace, Pipeline
 from triad.quarantine import NotQuarantined
@@ -46,9 +49,14 @@ from triad.retrieval.scope import Scope
 
 __all__ = ["RealDemoService"]
 
-# Fixed, generic probe queries -- not derived from any tenant's real content,
-# just search strings used to exercise retrieval for the probe/property-test
-# views. Reused (not per-request-random) so a probe result is reproducible.
+# Fixed, generic probe queries used ONLY by the property test (which re-checks
+# SecureRetriever's structural no-leak invariant against the caller's OWN
+# scope and therefore has no "target" to be specific about). The probe's
+# actual secure-vs-leaky comparison no longer uses these -- see
+# _default_qa_loader / _target_probe_query below, and the comment on
+# probe() -- because a fixed generic query never tests what target_tenant
+# shapes; it only tests how well as_tenant's own mail matches a generic
+# string.
 _PROBE_QUERIES = (
     "quarterly budget and financial summary",
     "project status update and next steps",
@@ -56,6 +64,17 @@ _PROBE_QUERIES = (
     "headcount and staffing plan",
     "meeting notes and action items",
 )
+
+
+def _default_qa_loader(target_tenant: str) -> list[QARecord]:
+    """The real question source: EnronQA's own test-split QA records for
+    ``target_tenant``, the exact same source and split
+    ``triad.eval.tenant_leak`` uses to build its cross-tenant probes.
+    Deliberately NOT shared code with tenant_leak.py (see probe()'s
+    docstring) -- this reproduces its *predicate*, not its module, since
+    tenant_leak.py additionally does corpus-building/centroid-pairing that a
+    single already-chosen (as_tenant, target_tenant) probe has no use for."""
+    return load_qa(split="test", users=[target_tenant])
 
 # How many real SecureRetriever.retrieve() calls back the "property test"
 # pass/total count in probe(): a live regression check against the actual
@@ -139,7 +158,13 @@ def _trace_events(answer: Answer) -> tuple[TraceEvent, ...]:
         events.append(TraceEvent("-", api_stage, status, detail))
 
     if not any(d.stage == "egress" for d in answer.decisions):
-        events.append(TraceEvent("-", "egress", "paused", "Stage 3 egress checks are paused in this build"))
+        # Reached only when the pipeline that produced this Answer had
+        # stage3_enabled=False -- a real configuration fact (Stage 3 itself
+        # is implemented and measured; see the README's "Stage 3 -- output
+        # and egress" section), not "paused"/unimplemented.
+        events.append(TraceEvent(
+            "-", "egress", "disabled", "Stage 3 egress checks are disabled by configuration in this build",
+        ))
 
     return tuple(events)
 
@@ -176,10 +201,21 @@ def _chunk_trace_to_steps(ct: ChunkTrace, *, stage3_enabled: bool) -> list[Chunk
         steps.append(ChunkTraceStep("retrieve", "blocked", "never entered the retrievable index", _at(1)))
         steps.append(ChunkTraceStep("prompt", "skipped", "not present in any prompt", _at(2)))
 
+    # This view describes CONFIGURATION, not a specific answer's outcome --
+    # /api/trace/{id} isn't tied to any particular /api/ask call, so it
+    # cannot honestly claim a check "ran" on this chunk (see _trace_events
+    # above for the per-answer version, which reports a real per-call
+    # GuardDecision). Stage 3 itself is implemented and measured either way
+    # (README's "Stage 3 -- output and egress" section); this step only
+    # says whether it is switched on for this build.
     if stage3_enabled:
-        steps.append(ChunkTraceStep("egress", "checked", "Stage 3 egress checks ran", _at(3)))
+        steps.append(ChunkTraceStep(
+            "egress", "enabled", "Stage 3 egress checks are enabled in this build", _at(3),
+        ))
     else:
-        steps.append(ChunkTraceStep("egress", "paused", "Stage 3 egress checks are paused in this build", _at(3)))
+        steps.append(ChunkTraceStep(
+            "egress", "disabled", "Stage 3 egress checks are disabled by configuration in this build", _at(3),
+        ))
     return steps
 
 
@@ -234,8 +270,14 @@ def _row_from_tenant_leak(data: dict[str, Any]) -> ResultRow:
 class RealDemoService:
     """Implements ``DemoService`` by delegating to a real ``Pipeline`` instance."""
 
-    def __init__(self, pipeline: Pipeline) -> None:
+    def __init__(self, pipeline: Pipeline, *, qa_loader=_default_qa_loader) -> None:
         self._pipeline = pipeline
+        # Injectable so tests can supply fabricated QARecords instead of
+        # reading real EnronQA parquet files -- same DI pattern as `store`/
+        # `embedder`/`llm` on Pipeline itself. Defaults to the real loader in
+        # every non-test path (including --real).
+        self._qa_loader = qa_loader
+        self._qa_cache: dict[str, tuple[QARecord, ...]] = {}
 
     def meta(self) -> ServiceMeta:
         return ServiceMeta(service="real", data_source="real", note="Live pipeline output.")
@@ -277,6 +319,16 @@ class RealDemoService:
         scope = Scope.of(tenant)
         answer = pipeline.ask(question, scope, k=5)
 
+        # Per-response composition: of the chunks THIS call actually
+        # retrieved, how many are real vs synthetic, read straight off each
+        # chunk's own Provenance.data_source (round-tripped byte-for-byte
+        # through TenantStore -- see store.py's _chunk_to_metadata). This is
+        # the per-response fact; data_source="mixed" below stays the
+        # corpus-level, conservative claim ("a synthetic chunk COULD have
+        # been retrieved") -- this doesn't replace it, it explains it.
+        n_real = sum(1 for sc in answer.retrieval.chunks if sc.chunk.provenance.data_source == "real")
+        n_synthetic = sum(1 for sc in answer.retrieval.chunks if sc.chunk.provenance.data_source == "synthetic")
+
         return AskResult(
             answer=answer.text,
             declined=answer.retrieval.declined,
@@ -290,6 +342,8 @@ class RealDemoService:
             # synthetic PoisonedRAG-style poison set (see Pipeline.demo's own
             # docstring) -- "mixed" is the honest label, never "real".
             data_source="mixed",
+            n_chunks_real=n_real,
+            n_chunks_synthetic=n_synthetic,
         )
 
     # -- quarantine -----------------------------------------------------------
@@ -313,10 +367,44 @@ class RealDemoService:
 
     # -- probe -----------------------------------------------------------
 
+    def _target_probe_query(self, target_tenant: str) -> tuple[str, str]:
+        """Builds the probe query the same way ``triad.eval.tenant_leak``
+        builds its cross-tenant probes: a real EnronQA question whose gold
+        answer lives in ``target_tenant``'s own inbox, restricted to an
+        email actually indexed in THIS live store (not just anywhere in
+        EnronQA -- ``Pipeline.demo`` only ingests a capped subset per
+        tenant, and some of that subset may have been quarantined at
+        ingest and therefore never written to the store at all).
+
+        Returns ``(question, gold_chunk_id)``. This is deliberately the
+        target_tenant's content shaping the query -- the fix for a probe
+        that used to ask a fixed generic question regardless of which
+        tenant was being probed, which measured "does as_tenant's inbox
+        match a generic string" instead of "did isolation fail on a query
+        aimed at target_tenant's content."
+
+        Raises ``NoUsableTargetDocument`` if no such question/chunk pair
+        exists -- NEVER falls back to ``_PROBE_QUERIES``, which would
+        silently reintroduce the exact bug this method exists to fix.
+        """
+        records = self._qa_cache.get(target_tenant)
+        if records is None:
+            records = tuple(self._qa_loader(target_tenant))
+            self._qa_cache[target_tenant] = records
+
+        store = self._pipeline.store
+        for record in records:
+            if record.tenant != target_tenant:
+                continue
+            chunk = store.get(record.email_path)
+            if chunk is not None and chunk.tenant == target_tenant:
+                return record.question, record.email_path
+        raise NoUsableTargetDocument(target_tenant)
+
     def probe(self, as_tenant: str, target_tenant: str) -> ProbeResult:
         pipeline = self._pipeline
         own_scope = Scope.of(as_tenant)
-        query = _PROBE_QUERIES[0]
+        query, gold_chunk_id = self._target_probe_query(target_tenant)
 
         secure_retriever = SecureRetriever(store=pipeline.store, embedder=pipeline.embedder)
         leaky_retriever = LeakyRetriever(store=pipeline.store, embedder=pipeline.embedder)
@@ -324,12 +412,22 @@ class RealDemoService:
         secure_result = secure_retriever.retrieve(query, own_scope, k=5)
         leaky_result = leaky_retriever.retrieve(query, own_scope, k=5)
 
+        cross_tenant = as_tenant != target_tenant
+        leaky_ids = {sc.chunk.id for sc in leaky_result.chunks}
+        # The strong claim: not just "some foreign chunk came back" but
+        # "the SPECIFIC chunk this query was built to be answerable from
+        # came back for a different requester" -- the same leak_gold
+        # definition tenant_leak.py measures (67.6% headline number),
+        # reproduced here per-probe instead of aggregated over 500 probes.
+        gold_leaked = cross_tenant and gold_chunk_id in leaky_ids
+
         property_test = None
-        if as_tenant != target_tenant:
+        if cross_tenant:
             property_test = self._run_property_test(secure_retriever, own_scope)
 
         return ProbeResult(
             secure=_probe_side(secure_result), leaky=_probe_side(leaky_result), property_test=property_test,
+            query=query, target_gold_chunk_id=gold_chunk_id, gold_leaked=gold_leaked,
         )
 
     def _run_property_test(self, secure_retriever: SecureRetriever, scope: Scope) -> PropertyTestResult:

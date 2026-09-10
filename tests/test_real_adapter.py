@@ -15,8 +15,9 @@ import chromadb
 import pytest
 
 from triad.api.real_adapter import _VALID_RESULT_FILES, RealDemoService
-from triad.api.service import PropertyTestResult
+from triad.api.service import NoUsableTargetDocument, PropertyTestResult
 from triad.contract import Chunk, Provenance
+from triad.data.types import QARecord
 from triad.embed.hash_embedder import HashEmbedder
 from triad.eval._common import RESULTS_DIR
 from triad.pipeline import DECLINE_ANSWER, DefenseConfig, Pipeline
@@ -39,6 +40,18 @@ class FakeLLM:
 def make_chunk(cid, tenant, text, source_type="email"):
     return Chunk(id=cid, text=text, tenant=tenant, source_type=source_type,
                  provenance=Provenance("test", cid, "synthetic"))
+
+
+def make_qa(question, tenant, email_path):
+    """A fabricated QARecord standing in for a real EnronQA test-split row --
+    same shape ``_default_qa_loader`` would hand ``_target_probe_query``, so
+    the qa_loader fixtures below stay pure/deterministic/injectable instead
+    of reading real parquet files."""
+    return QARecord(
+        question=question, gold_answers=("an answer",), incorrect_answers=(),
+        email_path=email_path, tenant=tenant,
+        provenance=Provenance("test", f"{email_path}#qa", "synthetic"),
+    )
 
 
 @pytest.fixture
@@ -69,8 +82,24 @@ def pipeline(store, embedder, quarantine):
 
 
 @pytest.fixture
-def service(pipeline):
-    return RealDemoService(pipeline)
+def qa_loader():
+    """Fabricated stand-in for _default_qa_loader: a question per tenant
+    whose gold email is one of the chunks the `pipeline` fixture actually
+    indexed for that tenant."""
+    records = {
+        "alice": [make_qa("what is the quarterly budget review meeting about?", "alice", "c-alice-1")],
+        "bob": [make_qa("what is the headcount and staffing plan for next quarter?", "bob", "c-bob-1")],
+    }
+
+    def loader(target_tenant):
+        return list(records.get(target_tenant, []))
+
+    return loader
+
+
+@pytest.fixture
+def service(pipeline, qa_loader):
+    return RealDemoService(pipeline, qa_loader=qa_loader)
 
 
 # -- meta -----------------------------------------------------------------
@@ -99,6 +128,34 @@ def test_ask_defended_declines_for_a_tenant_with_no_own_documents(service):
     assert result.declined is True
     assert result.leak_mode is False
     assert result.chunks == ()
+    # An empty retrieval is 0 real AND 0 synthetic -- not "0% synthetic"
+    # (which would misleadingly read as a clean bill of health).
+    assert result.n_chunks_real == 0
+    assert result.n_chunks_synthetic == 0
+
+
+def test_ask_reports_per_response_real_vs_synthetic_chunk_composition(store, embedder, quarantine):
+    # A genuine mix: one chunk with real EnronQA-shaped provenance, one
+    # synthetic -- n_chunks_real/n_chunks_synthetic must reflect exactly
+    # what THIS call retrieved, read off each chunk's own Provenance, not a
+    # hardcoded corpus-level guess.
+    p = Pipeline(store=store, embedder=embedder, llm=FakeLLM(), quarantine=quarantine)
+    real_chunk = Chunk(
+        id="real-1", text="quarterly budget review meeting notes", tenant="mixedco",
+        source_type="email", provenance=Provenance("enronqa", "real-1", "real"),
+    )
+    synthetic_chunk = Chunk(
+        id="synthetic-1", text="quarterly budget review meeting notes (poison variant)", tenant="mixedco",
+        source_type="email", provenance=Provenance("poisonedrag:nq", "synthetic-1", "synthetic"),
+    )
+    p.ingest([real_chunk, synthetic_chunk])
+    service = RealDemoService(p)
+
+    result = service.ask("mixedco", "quarterly budget review meeting notes", defense=True)
+    assert len(result.chunks) == 2
+    assert result.n_chunks_real == 1
+    assert result.n_chunks_synthetic == 1
+    assert result.n_chunks_real + result.n_chunks_synthetic == len(result.chunks)
 
 
 def test_ask_defended_answers_from_own_documents(service):
@@ -108,12 +165,19 @@ def test_ask_defended_answers_from_own_documents(service):
     assert result.answer == "the answer is 42"
     assert all(c.chunk.tenant == "alice" for c in result.chunks)
     assert result.data_source == "mixed"
+    # Per-response composition: every chunk this fixture pipeline holds is
+    # synthetic test data (make_chunk's Provenance(..., "synthetic")).
+    assert result.n_chunks_real == 0
+    assert result.n_chunks_synthetic == len(result.chunks) > 0
     # ingest-stage trace for the quarantined sibling chunk never appears here
     # (it was never retrieved for this ask), but the retrieved chunk's trace
     # events are all present.
     stages = {e.stage for e in result.trace}
     assert stages <= {"ingest", "retrieve", "prompt", "egress"}
-    assert any(e.stage == "egress" and e.event == "paused" for e in result.trace)
+    # stage3_enabled defaults False on this fixture's DefenseConfig -- a
+    # real configuration fact, not "paused" (Stage 3 is implemented and
+    # measured; see the README).
+    assert any(e.stage == "egress" and e.event == "disabled" for e in result.trace)
 
 
 def test_ask_undefended_uses_leaky_retriever_and_can_see_other_tenants(service):
@@ -204,11 +268,94 @@ def test_probe_cross_tenant_leaky_side_can_leak(store, embedder, quarantine):
     # demonstrate.
     p = Pipeline(store=store, embedder=embedder, llm=FakeLLM(), quarantine=quarantine)
     p.ingest([make_chunk("c-target-1", "target", "quarterly budget and financial summary")])
-    service = RealDemoService(p)
+    loader = lambda t: [make_qa("quarterly budget and financial summary", "target", "c-target-1")] if t == "target" else []  # noqa: E731
+    service = RealDemoService(p, qa_loader=loader)
 
     result = service.probe("empty-tenant", "target")
     assert result.leaky.leaked is True
     assert result.leaky.n_foreign >= 1
+    # The strong claim: the SPECIFIC chunk the query was built from came
+    # back for a requester with no relationship to "target" -- not just
+    # some unrelated foreign chunk.
+    assert result.target_gold_chunk_id == "c-target-1"
+    assert result.gold_leaked is True
+
+
+# -- probe: target-specific query (Defect 1 fix) ----------------------------
+
+def test_probe_query_is_derived_from_target_tenant_not_a_fixed_generic_string(service):
+    result_alice = service.probe("bob", "alice")
+    result_bob = service.probe("alice", "bob")
+    assert result_alice.query == "what is the quarterly budget review meeting about?"
+    assert result_bob.query == "what is the headcount and staffing plan for next quarter?"
+    assert result_alice.query != result_bob.query
+    assert result_alice.target_gold_chunk_id == "c-alice-1"
+    assert result_bob.target_gold_chunk_id == "c-bob-1"
+
+
+def test_probe_raises_when_target_tenant_has_no_qa_record(service):
+    # qa_loader fixture has no entry for "nobody" -- must fail loudly, never
+    # silently fall back to a fixed generic query.
+    with pytest.raises(NoUsableTargetDocument):
+        service.probe("alice", "nobody")
+
+
+def test_probe_raises_rather_than_falls_back_when_the_qa_record_points_at_an_unindexed_chunk(pipeline):
+    # The QA record's email exists in EnronQA but was never actually
+    # ingested into THIS store (e.g. capped out of the demo subset, or
+    # quarantined at ingest) -- store.get() returns None, so this must
+    # still fail loudly rather than silently using a different chunk or
+    # falling back to the generic query.
+    loader = lambda t: [make_qa("some question", "alice", "c-alice-never-ingested")]  # noqa: E731
+    service = RealDemoService(pipeline, qa_loader=loader)
+    with pytest.raises(NoUsableTargetDocument):
+        service.probe("bob", "alice")
+
+
+def test_probe_qa_loader_is_memoized_per_target_tenant(pipeline):
+    calls = []
+
+    def counting_loader(target_tenant):
+        calls.append(target_tenant)
+        return [make_qa("q", "alice", "c-alice-1")]
+
+    service = RealDemoService(pipeline, qa_loader=counting_loader)
+    service.probe("bob", "alice")
+    service.probe("bob", "alice")
+    assert calls == ["alice"], "qa_loader should be called once per target_tenant, not once per probe"
+
+
+@pytest.mark.slow
+def test_default_qa_loader_reuses_tenant_leaks_predicate_against_real_enronqa_data(tmp_path):
+    # Not a refactor into shared code with triad.eval.tenant_leak (its
+    # corpus-building/centroid-pairing has no use for a single already-
+    # chosen (as_tenant, target_tenant) probe) -- this asserts the same
+    # PREDICATE instead: a real EnronQA test-split question whose tenant
+    # matches and whose email_path is actually indexed in the demo corpus.
+    from triad.api.real_adapter import _default_qa_loader
+    from triad.data.enronqa import load_emails
+    from triad.pipeline import Pipeline
+
+    emails = load_emails()
+    tenants = sorted({c.tenant for c in emails})[:6]
+    target = tenants[0]
+
+    embedder = HashEmbedder(dim=64)
+    store = TenantStore(client=chromadb.EphemeralClient(), space=embedder.space)
+    quarantine = QuarantineQueue(path=tmp_path / "q.json", log_path=tmp_path / "log.jsonl")
+
+    indexed = [c for c in emails if c.tenant == target][:25]
+    p = Pipeline(store=store, embedder=embedder, llm=FakeLLM(), quarantine=quarantine)
+    p.ingest(indexed)
+    service = RealDemoService(p)  # real _default_qa_loader
+
+    records = _default_qa_loader(target)
+    indexed_ids = {c.id for c in indexed}
+    matches = [r for r in records if r.tenant == target and r.email_path in indexed_ids]
+    assert matches, f"expected at least one real EnronQA question answerable from {target}'s indexed mail"
+
+    query, gold_id = service._target_probe_query(target)
+    assert gold_id in indexed_ids
 
 
 # -- trace -----------------------------------------------------------
@@ -223,7 +370,7 @@ def test_trace_for_live_chunk(service):
     stages = [s.stage for s in steps]
     assert stages == ["ingest", "retrieve", "prompt", "egress"]
     assert steps[0].status == "allowed"
-    assert steps[-1].status == "paused"  # stage3_enabled defaults False
+    assert steps[-1].status == "disabled"  # stage3_enabled defaults False -- a config fact, not "paused"
 
 
 def test_trace_for_quarantined_chunk(service):
