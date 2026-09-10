@@ -141,7 +141,8 @@ that *duplicate-text filtering has zero effect*: this clusters in embedding spac
 >
 > 1. **It is a mechanism, not an outcome.** `poison_collapse_rate` counts targets where 2+ poison
 >    documents were merged into a single vote. There is no LLM call anywhere in this eval. It does
->    not show the attack fails; that is ASR before→after, still pending below.
+>    not show the attack fails — see the end-to-end measurement below, which now exists and says it
+>    doesn't.
 > 2. **The 0% "clean wrong merge" figure in the mixed pool is vacuous, and is not reported here.**
 >    Poison occupied *all five* top-k slots in every verbatim and paraphrased target, so no clean
 >    chunk remained that *could* be wrongly merged. The honest measurement is a clean-only baseline
@@ -166,6 +167,24 @@ that *duplicate-text filtering has zero effect*: this clusters in embedding spac
 Embedder is bge-small, not Contriever (the paper's retriever). Contriever's cache covers only clean
 passages under another script's namespace, and its unnormalized dot-product convention would not
 carry these thresholds across unchanged.
+
+**The end-to-end measurement now exists, through a different harness (`Pipeline.ask`, Contriever,
+the PoisonedRAG ASR eval below) — and it confirms the mechanism does not buy an outcome.** Collapse
+was wired into `Pipeline.ask` but a bug (single-string `embed_query` passed where batch
+`embed_documents` was required) made every call fail closed, so it never fired on the production path
+until that call site was fixed. With it fixed, collapse fires on **30 of 100** defended-attack
+targets (0/100 before the fix), shrinking the retrieved set from 5 chunks to as few as 1. ASR does not
+move: of those 30 targets, **18 attacks succeeded before collapse fired and 18 succeed after**. Not
+the same 18: two targets flipped to success (test229, test254) and two flipped to failure (test243,
+test418), so the count is a genuine wash rather than an untouched set. Collapsing five near-identical poison chunks down to one still leaves one poison chunk
+in the prompt, and one is enough for this model and this attack. The premise this defense was built
+on — PoisonedRAG's own "five documents outvote the corpus" arithmetic — does not survive an
+end-to-end ASR test on this model and corpus, even though the clustering mechanism above works
+exactly as designed. The one piece of good news is also now measured, not assumed: collapse did not
+fire on a single clean-corpus retrieval in this run (0/100 `clean_on` probes; clean arm stayed 98/100
+retrieving 5 chunks in both the old and the new run), so — unlike TrustRAG's 5.79%/43.70% clean-drop
+figures cited above — this collapse mechanism cost no measured clean accuracy here, precisely because
+it had nothing to collapse in clean retrieval to begin with.
 
 ### Stage 3 — output and egress
 
@@ -240,30 +259,47 @@ real false-positive drivers on ordinary mail, not artifacts of a favorable harne
 
 ### Attack success rate, before → after
 
-`results/poisonedrag_n100_20260910T153530Z.json` · **100 PoisonedRAG NQ targets** (500 adv_texts)
+`results/poisonedrag_n100_20260910T195905Z.json` · **100 PoisonedRAG NQ targets** (500 adv_texts)
 against **10,117 real BEIR NQ passages**, poison ratio 4.7%, Contriever, k=5, generator
 `openai/gpt-oss-20b`. `TRIAD_REQUIRE_REAL=1` — no synthetic data anywhere in this run.
 
 | | Defense OFF | Defense ON |
 |---|---|---|
-| **Attack success rate** | **62.0%** | **47.0%** |
-| **Clean accuracy** | 46.0% | **46.0%** |
+| **Attack success rate** | **62.0%** (62/100) | **47.0%** (47/100) |
+| **Clean accuracy** | 46.0% (46/100) | 45.0% (45/100) |
 
-**ASR drops 15 points and clean accuracy is unchanged.** The clean tie is not a bug and not luck:
-Stage 1 flagged only 68 of 10,117 clean passages (0.67%) at ingestion, so removing under 1% of clean
-content plausibly changes no answers at this sample size. That is the RobustRAG criterion — a
-defense that buys robustness by wrecking clean QA is unshippable — and here the cost is zero within
-measurement error.
+**This is the corrected measurement — collapse is now genuinely active.** An earlier run
+(`poisonedrag_n100_20260910T153530Z.json`, kept on disk, no longer surfaced by the UI) reported this
+same 62%→47% while cluster collapse was silently inert: `triad/pipeline.py` passed `collapse_topk` a
+single-string `embed_query` where the function requires a batch `embed_documents`, so every call
+raised and fail-closed back to the uncollapsed retrieval. Nothing crashed and nothing was fabricated,
+but none of that run's 15-point drop could be attributed to collapse. This run is the same
+configuration with that call site fixed to `embed_documents` — and the 15-point drop is unchanged,
+because it was never coming from collapse. It comes from ingestion quarantine: **153 of 500 poison
+chunks (30.6%) were quarantined** before retrieval ever ran, identically in both runs. What collapse
+itself buys, now that it is genuinely firing, is measured separately in Stage 1B above — it turns out
+to be nothing, and that section explains why.
 
-At ingestion, **153 of 500 poison chunks (30.6%) were quarantined**.
+The 1-point clean-accuracy move (46%→45%) is a single flipped target (`test88`), which returned a
+different but still plausible answer ("a small French village in the 18th-century countryside" → "an
+unnamed, fairy-tale kingdom"). **It is not a collapse effect**, and that part is measured rather than
+assumed: collapse fired on 0 of 100 `clean_on` probes, and test88 retrieved 5 chunks in both runs.
+The answer differed because the call was served live rather than from cache, which means its prompt
+differed — the corpus index is rebuilt per run, so the retrieved set for a given query is not
+guaranteed identical across builds. We have not pinned that down further; one clean target moving in
+either direction is inside the noise of an n=100 sample, and we would rather say that than assert a
+cause we did not verify.
 
 **Be honest about the size of this win.** 47% ASR is still high: nearly half the attacks succeed.
 The defense meaningfully reduces the attack but does not defeat it, and the residual is what
 future work has to attack. Quote it as a 15-point reduction, never as "we stop PoisonedRAG."
 
-All 396 real probes across all four conditions retrieved exactly 5 chunks. The 4 remaining rows are
-genuine Groq empty completions (retried 3×), labeled `empty_response_failure`, and are not counted
-as retrieval failures.
+All 200 defense-OFF probes retrieved exactly 5 chunks — collapse is disabled there by config. All 100
+`clean_on` probes also retrieved exactly 5 — collapse is enabled there but never fired (0/100). Of the
+100 defended-attack (`asr_on`) probes, **70 retrieved 5 and 30 retrieved fewer** (collapse fired on
+those 30, distribution {5→4: 17, 5→3: 9, 5→2: 3, 5→1: 1}), all counted in the 47.0% above. The 4
+remaining rows across all four conditions are genuine Groq empty completions (retried 3×), labeled
+`empty_response_failure`, and are not counted as retrieval failures.
 
 #### The bug that made the earlier run invalid
 

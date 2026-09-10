@@ -89,8 +89,12 @@ _CONTRACT_STAGE_TO_API_STAGE = {"ingest": "ingest", "retrieve": "retrieve", "gen
 # triad.eval.report``, which this module deliberately does not duplicate).
 # ---------------------------------------------------------------------------
 _VALID_RESULT_FILES: dict[str, str] = {
-    "poisonedrag_n100_20260910T153530Z.json":
-        "headline PoisonedRAG black-box run (n=100 targets) -> one ResultRow",
+    "poisonedrag_n100_20260910T195905Z.json":
+        "headline PoisonedRAG black-box run (n=100 targets) -> one ResultRow. "
+        "Supersedes poisonedrag_n100_20260910T153530Z.json, which measured "
+        "cluster collapse while it was silently inert (triad/pipeline.py passed "
+        "collapse_topk a single-string embed_query where a batch embed_documents "
+        "was required); this run is the same configuration with that call site fixed.",
     "tenant_leak_20260910T120126Z.json":
         "headline cross-tenant retrieval leak probe (n=500 probes) -> one ResultRow",
     "geometry_20260910T142941Z.json":
@@ -368,7 +372,7 @@ class RealDemoService:
     def results_table(self) -> list[ResultRow]:
         rows: list[ResultRow] = []
 
-        poisonedrag = self._read_allowlisted("poisonedrag_n100_20260910T153530Z.json")
+        poisonedrag = self._read_allowlisted("poisonedrag_n100_20260910T195905Z.json")
         if poisonedrag is not None:
             rows.append(_row_from_poisonedrag(poisonedrag))
 

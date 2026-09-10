@@ -261,7 +261,7 @@ def test_results_table_reads_allowlisted_files_and_derives_real_numbers(
     store, embedder, quarantine, tmp_path, monkeypatch,
 ):
     monkeypatch.setattr("triad.api.real_adapter.RESULTS_DIR", tmp_path)
-    (tmp_path / "poisonedrag_n100_20260910T153530Z.json").write_text(
+    (tmp_path / "poisonedrag_n100_20260910T195905Z.json").write_text(
         '{"asr": {"off": 0.6, "on": 0.4}, "clean_accuracy": {"off": 0.5, "on": 0.5}, '
         '"latency_ms": {"stage2_retrieval_on_mean": 200.0, "stage2_retrieval_off_mean": 100.0}, '
         '"ingestion": {"clean_quarantined": 10, "clean_submitted": 100}, "n_targets": 100}',
