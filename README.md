@@ -116,6 +116,12 @@ that *duplicate-text filtering has zero effect*: this clusters in embedding spac
 >    chunk remained that *could* be wrongly merged. The honest measurement is a clean-only baseline
 >    with no poison injected: **14.0% of held-out questions (7/50) had two genuinely distinct clean
 >    passages merged.** Collapse does damage real retrieval, and that cost is real.
+>    This is consistent with the published literature rather than an anomaly: cluster-filtering
+>    defenses are known to cost clean accuracy. CamoDocs ([arXiv:2608.28389](https://arxiv.org/html/2608.28389v1),
+>    Table 3) measures TrustRAG — the cluster-filtering defense our collapse borrows from — removing
+>    91.48% of retrieved documents on NeoQA and dropping clean accuracy from 29.13% to 5.79%, and
+>    removing 12.78% on HotpotQA for a 49.10% → 43.70% drop. Our 14% sits at the mild end of that
+>    range, but it is the same trade-off and must be quoted alongside the collapse rate.
 > 3. **The clean pool does not contain the right answers.** `load_nq` was called without
 >    `include_ids`, so each target's actual gold passage is almost certainly absent from the 2,500
 >    held-out clean passages. This measures 5 targeted poison texts against 2,500 *unrelated* clean
@@ -317,6 +323,8 @@ never touch the real file — they build temp files with fake keys.
 - EchoLeak / CVE-2025-32711 · [arXiv:2509.10540](https://arxiv.org/abs/2509.10540)
 - Relevance–authorization gap · [arXiv:2605.05287](https://arxiv.org/html/2605.05287v1) (ACM CAIS 2026)
 - RobustRAG · [arXiv:2405.15556](https://arxiv.org/html/2405.15556v2)
+- TrustRAG — the cluster-filtering idea behind Stage 1B's top-k collapse · [arXiv:2501.00879](https://arxiv.org/abs/2501.00879)
+- CamoDocs — independently measures TrustRAG's clean-accuracy cost · [arXiv:2608.28389](https://arxiv.org/html/2608.28389v1)
 - LLMail-Inject, IEEE SaTML 2025 · [arXiv:2506.09956](https://arxiv.org/html/2506.09956v1)
 - EnronQA · [arXiv:2505.00263](https://arxiv.org/html/2505.00263) — BIPIA · [arXiv:2312.14197](https://arxiv.org/abs/2312.14197) — BEIR · [arXiv:2104.08663](https://arxiv.org/pdf/2104.08663)
 - OWASP [LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
