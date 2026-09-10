@@ -63,14 +63,15 @@ thresholds were tuned on. The drop to 51.4% on phase 2 is what a held-out split 
 
 ### Stage 1B — poison geometry
 
-`results/geometry_20260910T142050Z.json` · 5,000 BEIR NQ passages + PoisonedRAG's 100 NQ targets.
-Targets sorted by id: the first 50 tune thresholds, **the other 50 are never touched until report
-time**; the clean sample is split the same way.
+`results/geometry_20260910T142941Z.json` · 5,000 BEIR NQ passages + PoisonedRAG's 100 NQ targets
+(500 adv_texts). Targets sorted by id: the first 50 tune thresholds, **the other 50 are never
+touched until report time**; the clean sample is split the same way, and manifold isolation's
+reference corpus is the dev half only.
 
 Against an adaptive attacker — (a) the paper's verbatim question prefix, (b) a deterministically
 paraphrased prefix, (c) no prefix at all:
 
-**Ingest-time scan** (held-out, 250 poison texts per variant):
+**Ingest-time scan** (held-out, 250 poison texts per variant, echo threshold 0.90 tuned to a ≤1% dev FPR):
 
 | Attack variant | Query-echo | Manifold isolation | Combined |
 |---|---|---|---|
@@ -79,29 +80,55 @@ paraphrased prefix, (c) no prefix at all:
 | no prefix | 0.0% | 2.4% | **2.4%** |
 
 False positives on the 2,500 held-out clean passages: query-echo 0.64%, manifold isolation 2.56%,
-**combined 3.2%** — a property of the clean corpus, so it does not vary by attack variant.
+combined 3.2%.
 
-**Ingest-time geometry degrades hard under adaptation, and this repo measures its own defense
-failing.** Query-echo is a cheap trap for the published attack, not a defense.
+Two findings here, both negative, both measured:
 
-**Query-time cluster collapse** (held-out, k=5, similarity threshold 0.75) is what carries:
+- **Ingest-time detection collapses under adaptation**: 34.4% → 6.8% → 2.4%. Query-echo is a cheap
+  trap for the *published* attack, not a defense. An attacker who paraphrases the prefix costs us
+  five sixths of the catch rate; one who drops it costs us all of it.
+- **Manifold isolation does not work at all.** Its poison catch (0.4–2.4%) is *lower than its own
+  clean false-positive rate* (1.36–4.88% across candidate cutoffs) — it is worse than chance on this
+  data, and adding it to the combined score raises FPR from 0.64% to 3.2% for almost no catch gain.
+  PoisonedRAG's texts are fluent and on-topic, so they simply do not sit off the corpus manifold in
+  this embedding space. This contradicts the design premise that isolation would carry the detector
+  when query-echo went dark. It does not.
 
-| Variant | Poison cluster collapsed to one vote | Clean documents wrongly merged |
+**Query-time cluster collapse** (held-out, k=5, similarity threshold 0.75):
+
+| Attack variant | Poison cluster collapsed to one vote | Poison held 5 of 5 top-k slots |
 |---|---|---|
-| verbatim | 100% | 0% |
-| paraphrased | 100% | 0% |
-| no prefix | 96% | 0% |
+| verbatim | 100% | 50/50 targets |
+| paraphrased | 100% | 50/50 targets |
+| no prefix | 96% | 48/50 targets |
 
-The shared embedding neighbourhood the five injected texts occupy survives paraphrasing and prefix
-removal, which is why this holds where query-echo collapses. It also answers the paper's own
-finding that *duplicate-text filtering has zero effect*: this clusters in embedding space, not by
-hash.
+The five injected texts share an embedding neighbourhood that survives paraphrasing and prefix
+removal, which is why this holds where query-echo collapses. It also answers the paper's own finding
+that *duplicate-text filtering has zero effect*: this clusters in embedding space, not by hash.
 
-> **What this number does and does not prove.** `poison_collapse_rate` measures the *mechanism*:
-> given 2+ poison documents in the top-5, they are merged into a single vote. There is no LLM call
-> anywhere in this eval. It does **not** show the attack fails — collapsing five votes to one still
-> leaves a poison document in context. Whether that translates into the model answering correctly
-> is ASR before→after, measured separately below.
+> **Three things this number does not prove — read before quoting it.**
+>
+> 1. **It is a mechanism, not an outcome.** `poison_collapse_rate` counts targets where 2+ poison
+>    documents were merged into a single vote. There is no LLM call anywhere in this eval. It does
+>    not show the attack fails; that is ASR before→after, still pending below.
+> 2. **The 0% "clean wrong merge" figure in the mixed pool is vacuous, and is not reported here.**
+>    Poison occupied *all five* top-k slots in every verbatim and paraphrased target, so no clean
+>    chunk remained that *could* be wrongly merged. The honest measurement is a clean-only baseline
+>    with no poison injected: **14.0% of held-out questions (7/50) had two genuinely distinct clean
+>    passages merged.** Collapse does damage real retrieval, and that cost is real.
+> 3. **The clean pool does not contain the right answers.** `load_nq` was called without
+>    `include_ids`, so each target's actual gold passage is almost certainly absent from the 2,500
+>    held-out clean passages. This measures 5 targeted poison texts against 2,500 *unrelated* clean
+>    passages, not against the real competing evidence for that question — which inflates how far
+>    poison dominates the top-k, and therefore the collapse rate. Fixing it invalidates every clean
+>    embedding cache key and costs ~50 minutes of CPU embedding; it has not been done.
+>
+> Also: the similarity threshold was not selected on discriminating evidence. Every candidate from
+> 0.75 to 0.95 scored 0% dev wrong-merge, so 0.75 won on a tie-break, not on measurement.
+
+Embedder is bge-small, not Contriever (the paper's retriever). Contriever's cache covers only clean
+passages under another script's namespace, and its unnormalized dot-product convention would not
+carry these thresholds across unchanged.
 
 ### Stage 3 — output and egress
 

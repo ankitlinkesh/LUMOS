@@ -1,0 +1,195 @@
+{
+  "script": "geometry",
+  "written_at_utc": "20260910T142941Z",
+  "git": {
+    "hash": "d39b6fe3b90048a73d1c760963f0f522b7d45898",
+    "dirty": true
+  },
+  "data_composition": {
+    "clean_corpus": "beir.nq: 5,000 real",
+    "poisonedrag_targets": "poisonedrag.nq_targets: 100 real"
+  },
+  "data_source": "real",
+  "embedder": {
+    "name": "BAAI/bge-small-en-v1.5",
+    "dim": 384,
+    "space": "cosine"
+  },
+  "corpus": "nq",
+  "seed": 0,
+  "n_clean_total": 5000,
+  "n_dev_clean": 2500,
+  "n_holdout_clean": 2500,
+  "n_targets_total": 100,
+  "n_dev_targets": 50,
+  "n_holdout_targets": 50,
+  "n_adv_texts_total": 500,
+  "n_adv_texts_dev": 250,
+  "n_adv_texts_holdout": 250,
+  "split_description": "PoisonedRAG's 100 nq targets sorted by id: first 50 DEV (thresholds tuned), other 50 HELD-OUT (reported numbers, never touched while tuning). Clean BEIR sample split the same way (first half DEV, second half HELD-OUT). At report time, manifold_isolation's reference corpus is the DEV clean half; HELD-OUT clean/poison are scored against it as new, unseen candidates.",
+  "ingest_scan": {
+    "max_fpr_budget_dev": 0.01,
+    "tuned_query_echo_threshold": 0.9,
+    "dev_query_echo_fpr_at_tuned_threshold": 0.0068,
+    "dev_verbatim_catch_at_tuned_threshold": 0.336,
+    "isolation_percentile_chosen": 0.02,
+    "isolation_cutoff_chosen": 0.563932478427887,
+    "isolation_fpr_by_percentile_holdout": {
+      "0.01": {
+        "cutoff": 0.5505414605140686,
+        "holdout_clean_fpr": 0.0136
+      },
+      "0.02": {
+        "cutoff": 0.563932478427887,
+        "holdout_clean_fpr": 0.0256
+      },
+      "0.05": {
+        "cutoff": 0.5819187760353088,
+        "holdout_clean_fpr": 0.0488
+      }
+    },
+    "knn_k": 5,
+    "held_out_variant_catch_rates": {
+      "verbatim": {
+        "n": 250,
+        "query_echo_catch_rate": 0.336,
+        "manifold_isolation_catch_rate": 0.008,
+        "combined_catch_rate": 0.344
+      },
+      "paraphrased": {
+        "n": 250,
+        "query_echo_catch_rate": 0.064,
+        "manifold_isolation_catch_rate": 0.004,
+        "combined_catch_rate": 0.068
+      },
+      "no_prefix": {
+        "n": 250,
+        "query_echo_catch_rate": 0.0,
+        "manifold_isolation_catch_rate": 0.024,
+        "combined_catch_rate": 0.024
+      }
+    },
+    "held_out_clean_fpr": {
+      "query_echo": 0.0064,
+      "manifold_isolation": 0.0256,
+      "combined": 0.032
+    },
+    "query_echo_diagnostic_verbatim_holdout": {
+      "n": 250,
+      "no_question_sentence_detected": 20,
+      "matched_sentence_len_over_doc_len_percentiles": {
+        "25": 0.18545296167247388,
+        "50": 0.20445324096981693,
+        "75": 0.22448979591836735,
+        "95": 0.35576246080449203
+      },
+      "sim_percentiles": {
+        "5": 0.0,
+        "25": 0.8640721440315247,
+        "50": 0.8851388692855835,
+        "75": 0.9079749584197998,
+        "95": 0.94224613904953
+      },
+      "note": "matched_sentence_len_over_doc_len staying small (~0.2) confirms the no-space sentence splitter is correctly isolating just the question, not merging it into the body; sim sitting mostly in 0.8-0.95 with a 0.9 threshold (forced up by the dev clean FPR budget) is why catch rate lands well under 100% -- a precision/recall tradeoff at this threshold, not a broken splitter."
+    },
+    "manifold_isolation_honest_assessment": "At every operating point measured (1%/2%/5% dev percentile cutoffs) and every attacker variant, manifold_isolation's held-out catch rate on poison (0.4%-2.4%) is LOWER than its own held-out FPR on clean text (1.36%-4.88% depending on cutoff) -- it fires more often on real clean NQ passages than on PoisonedRAG's injected texts. PoisonedRAG's texts are fluent, on-topic and (per the paper's own design goal) engineered to sit close to the target question's neighborhood, so they do not drift off the corpus manifold in bge cosine space the way the module docstring predicts. As measured here, this signal is not merely weak: combining it with query_echo INCREASES combined FPR (0.64% -> 3.20%) for a negligible increase in combined catch on verbatim (33.6% -> 34.4%) and makes paraphrased/no_prefix catch barely move. It does not 'carry the signal when query_echo is gone', on this embedder/corpus -- it is close to noise."
+  },
+  "collapse_topk": {
+    "dev_tuning_by_sim_threshold": {
+      "0.75": {
+        "n_targets": 50,
+        "n_with_2plus_poison_in_top5": 50,
+        "poison_collapse_rate": 1.0,
+        "clean_wrong_merge_rate": 0.0,
+        "poison_in_top5_distribution": {
+          "5": 50
+        }
+      },
+      "0.80": {
+        "n_targets": 50,
+        "n_with_2plus_poison_in_top5": 50,
+        "poison_collapse_rate": 1.0,
+        "clean_wrong_merge_rate": 0.0,
+        "poison_in_top5_distribution": {
+          "5": 50
+        }
+      },
+      "0.85": {
+        "n_targets": 50,
+        "n_with_2plus_poison_in_top5": 50,
+        "poison_collapse_rate": 1.0,
+        "clean_wrong_merge_rate": 0.0,
+        "poison_in_top5_distribution": {
+          "5": 50
+        }
+      },
+      "0.90": {
+        "n_targets": 50,
+        "n_with_2plus_poison_in_top5": 50,
+        "poison_collapse_rate": 0.94,
+        "clean_wrong_merge_rate": 0.0,
+        "poison_in_top5_distribution": {
+          "5": 50
+        }
+      },
+      "0.93": {
+        "n_targets": 50,
+        "n_with_2plus_poison_in_top5": 50,
+        "poison_collapse_rate": 0.8,
+        "clean_wrong_merge_rate": 0.0,
+        "poison_in_top5_distribution": {
+          "5": 50
+        }
+      },
+      "0.95": {
+        "n_targets": 50,
+        "n_with_2plus_poison_in_top5": 50,
+        "poison_collapse_rate": 0.42,
+        "clean_wrong_merge_rate": 0.0,
+        "poison_in_top5_distribution": {
+          "5": 50
+        }
+      }
+    },
+    "chosen_sim_threshold": 0.75,
+    "chosen_sim_threshold_note": "0.75/0.80/0.85 all scored 100% dev poison_collapse_rate with 0% dev clean_wrong_merge_rate; the tie-break picked the lowest (most aggressive) of those three. The dev sweep did not discriminate between them -- no candidate in {0.75..0.95} ever produced a nonzero dev clean wrong-merge, so 'tuned' here means 'FPR-safe on this dev sample', not 'selected on discriminating evidence'.",
+    "held_out_by_variant": {
+      "verbatim": {
+        "n_targets": 50,
+        "n_with_2plus_poison_in_top5": 50,
+        "poison_collapse_rate": 1.0,
+        "clean_wrong_merge_rate": 0.0,
+        "poison_in_top5_distribution": {
+          "5": 50
+        }
+      },
+      "paraphrased": {
+        "n_targets": 50,
+        "n_with_2plus_poison_in_top5": 50,
+        "poison_collapse_rate": 1.0,
+        "clean_wrong_merge_rate": 0.0,
+        "poison_in_top5_distribution": {
+          "5": 50
+        }
+      },
+      "no_prefix": {
+        "n_targets": 50,
+        "n_with_2plus_poison_in_top5": 50,
+        "poison_collapse_rate": 0.96,
+        "clean_wrong_merge_rate": 0.0,
+        "poison_in_top5_distribution": {
+          "4": 2,
+          "5": 48
+        }
+      }
+    },
+    "clean_only_baseline_no_poison_injected": {
+      "n_targets": 50,
+      "wrong_merge_rate": 0.14,
+      "n_targets_with_any_collapse": 7
+    },
+    "caveats": "(1) load_nq() was called WITHOUT include_ids, so PoisonedRAG targets' actual gold passages are almost certainly absent from the 2,500-passage held-out clean pool used here -- this simulates '5 targeted poison texts vs. 2,500 UNRELATED clean passages', not poison vs. the real competing evidence for that question. That inflates poison_in_top5 and hence poison_collapse_rate; wiring include_ids in would change every clean embedding cache key and cost another ~50 min of CPU embedding, so it was not done here. (2) mixed-pool clean_wrong_merge_rate above is close to vacuous: see poison_in_top5_distribution per variant -- when poison occupies most/all of the 5 slots, too few clean chunks remain in that top-5 to ever collide. clean_only_baseline_no_poison_injected is the more honest number for 'do two distinct real clean passages get wrongly merged'."
+  },
+  "embedder_choice_note": "BAAI/bge-small-en-v1.5 was used, not facebook/contriever. An existing .cache/index/beir_nq_contriever_*.npy covers only clean BEIR passages under a different cache namespace (owned by another eval script) and does not cover the 1,500 poison-variant texts or the ~200 per-target collapse batches this script also needs -- those would still need fresh CPU embedding (~30-60 min observed rate) under contriever. Also contriever's convention is unnormalized dot-product (space='ip') vs. bge's normalized cosine; geometry.py internally L2-normalizes regardless, so a threshold tuned here would not transfer to contriever's raw dot-product ranking unchanged. Given manifold_isolation is already measured as non-discriminative on bge/cosine, contriever was not attempted.",
+  "total_wall_seconds": 225.86415850000049
+}
