@@ -1,0 +1,19 @@
+# CPU-only torch: pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch
+numpy
+scikit-learn
+chromadb
+sentence-transformers
+httpx
+beautifulsoup4
+markdown-it-py
+nh3
+tldextract
+fastapi
+uvicorn
+pyarrow
+pandas
+huggingface_hub
+requests
+hypothesis
+pytest

@@ -1,0 +1,13 @@
+[project]
+name = "triad-rag"
+version = "0.1.0"
+description = "Three-stage integrity and access control pipeline for RAG (PS 3)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: needs internet or a real Groq key; skipped by default",
+    "slow: loads real datasets or models",
+]
+addopts = "-m 'not network'"
