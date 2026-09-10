@@ -394,7 +394,7 @@ triad/
   llm/               Groq key pool, official free-tier limiter, principal-keyed cache, doctor
   retrieval/         scope algebra, Chroma store, SecureRetriever + LeakyRetriever (the bug)
   stage1/            1A hidden_text + directive; 1B geometry; their eval drivers
-  stage3/            egress, tool-call authorization, fencing  (PAUSED)
+  stage3/            egress, tool-call authorization, fencing  (measured; see Stage 3 above)
   eval/              the measurement harness, one module per experiment
   api/               FastAPI app, demo service, real adapter (incomplete)
   pipeline.py        end-to-end wiring
