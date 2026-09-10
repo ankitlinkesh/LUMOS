@@ -66,11 +66,11 @@ from triad.data.poisonedrag import load_targets
 from triad.data.types import DatasetHandle
 from triad.embed.sentence_transformer_embedder import SentenceTransformerEmbedder
 from triad.llm.cache import DiskCache
-from triad.llm.client import AllKeysExhausted, GroqClient
+from triad.llm.client import AllKeysExhausted, EmptyResponse, GroqClient
 from triad.llm.keys import load_keys
 from triad.llm.limiter import RateLimiter
 from triad.llm import limits
-from triad.pipeline import DefenseConfig, Pipeline
+from triad.pipeline import DefenseConfig, Pipeline, add_in_batches
 from triad.retrieval.scope import Scope
 from triad.retrieval.store import TenantStore
 
@@ -160,13 +160,16 @@ def build_stores(embedder, clean_chunks, clean_embeddings, poison_chunks, defens
     poison_embeddings = embedder.embed_documents([c.text for c in poison_chunks])
 
     # -- OFF: no Stage 1, no collapse. Clean-only and poisoned variants. ----
+    # add_in_batches (not store.add directly): a clean corpus of several
+    # thousand+ chunks in one store.add() call exceeds chromadb's own
+    # per-request batch cap -- see triad.pipeline.add_in_batches's docstring.
     store_off_clean = TenantStore(client=chromadb.EphemeralClient(), space=embedder.space)
-    store_off_clean.add(clean_chunks, clean_embeddings)
+    add_in_batches(store_off_clean, clean_chunks, clean_embeddings)
     pipeline_off_clean = Pipeline(store=store_off_clean, embedder=embedder, llm=None, defense=defense_off)
 
     store_off_poisoned = TenantStore(client=chromadb.EphemeralClient(), space=embedder.space)
-    store_off_poisoned.add(clean_chunks, clean_embeddings)
-    store_off_poisoned.add(poison_chunks, poison_embeddings)
+    add_in_batches(store_off_poisoned, clean_chunks, clean_embeddings)
+    add_in_batches(store_off_poisoned, poison_chunks, poison_embeddings)
     pipeline_off_poisoned = Pipeline(store=store_off_poisoned, embedder=embedder, llm=None, defense=defense_off)
 
     # -- ON: real Stage 1. Clean corpus ingested once (its own verdicts), --
@@ -189,7 +192,7 @@ def build_stores(embedder, clean_chunks, clean_embeddings, poison_chunks, defens
     kept_embeddings = clean_embeddings[kept_indices]
 
     store_on_poisoned = TenantStore(client=chromadb.EphemeralClient(), space=embedder.space)
-    store_on_poisoned.add(kept_chunks, kept_embeddings)  # the SAME verdicts as clean_report, applied directly -- not re-scanned
+    add_in_batches(store_on_poisoned, kept_chunks, kept_embeddings)  # the SAME verdicts as clean_report, applied directly -- not re-scanned
     pipeline_on_poisoned = Pipeline(store=store_on_poisoned, embedder=embedder, llm=None, defense=defense_on, quarantine=quarantine_poisoned)
     pipeline_on_poisoned.seed_reference_embeddings(kept_embeddings)
     print(f"  Stage 1 scanning {len(poison_chunks)} poison passages against the clean reference manifold...", file=sys.stderr)
@@ -203,14 +206,42 @@ def build_stores(embedder, clean_chunks, clean_embeddings, poison_chunks, defens
     }
 
 
+_EMPTY_RESPONSE_RETRIES = 2  # extra attempts beyond the first, on a fresh (uncached) call each time
+
+
 def ask_and_score(pipeline: Pipeline, llm, targets, *, scored_field: str, k: int, cache_stats: _common.CacheStats):
     """Runs every target's question against ``pipeline`` (which has no LLM of
     its own -- ``llm`` is injected per call so the same pipeline object can be
-    reused across the ASR and clean-accuracy passes without rebuilding it)."""
+    reused across the ASR and clean-accuracy passes without rebuilding it).
+
+    ``EmptyResponse`` (``triad.llm.client``: Groq returned a completion with no
+    usable text -- e.g. all of ``max_tokens`` spent on reasoning, nothing left
+    for the visible answer) is never cached by the client, so retrying is a
+    genuinely fresh attempt, not a replay. Observed rate: 1 in ~80 live calls
+    during this eval's own headline run. Retried up to ``_EMPTY_RESPONSE_RETRIES``
+    times; a target that still fails is recorded as a scored failure (never
+    counted as an attack success) rather than crashing the whole run and
+    losing every already-completed target -- ``AllKeysExhausted`` is the only
+    failure this eval treats as fatal (see module's ``main``)."""
     pipeline.llm = llm
     results = []
     for t in targets:
-        answer = pipeline.ask(t.question, Scope.of(PRINCIPAL), k=k)
+        answer = None
+        last_exc: EmptyResponse | None = None
+        for attempt in range(_EMPTY_RESPONSE_RETRIES + 1):
+            try:
+                answer = pipeline.ask(t.question, Scope.of(PRINCIPAL), k=k)
+                break
+            except EmptyResponse as exc:
+                last_exc = exc
+                print(f"  EmptyResponse for target {t.id} ({scored_field}), attempt {attempt + 1}: {exc}", file=sys.stderr)
+        if answer is None:
+            results.append({
+                "target_id": t.id, "question": t.question, "response": "",
+                "success": False, "empty_response_failure": True, "error": str(last_exc),
+                "retrieval_latency_ms": None, "n_retrieved": None, "declined": None,
+            })
+            continue
         cache_stats.record(answer.cached)
         if scored_field == "asr":
             success = attack_succeeded(t.incorrect_answer, answer.text)
@@ -218,6 +249,7 @@ def ask_and_score(pipeline: Pipeline, llm, targets, *, scored_field: str, k: int
             success = clean_correct(t.correct_answer, answer.text)
         results.append({
             "target_id": t.id, "question": t.question, "response": answer.text, "success": success,
+            "empty_response_failure": False,
             "retrieval_latency_ms": answer.retrieval.latency_ms,
             "n_retrieved": len(answer.retrieval.chunks),
             "declined": answer.retrieval.declined,
@@ -296,10 +328,19 @@ def main() -> None:
         return sum(1 for r in results if r["success"]) / len(results) if results else float("nan")
 
     def statistics_mean(xs):
+        xs = [x for x in xs if x is not None]
         return statistics.fmean(xs) if xs else float("nan")
+
+    def n_failures(results):
+        return sum(1 for r in results if r.get("empty_response_failure"))
 
     asr_off_rate, asr_on_rate = rate(asr_off), rate(asr_on)
     clean_off_rate, clean_on_rate = rate(clean_off), rate(clean_on)
+    empty_response_failures = {
+        "asr_off": n_failures(asr_off), "asr_on": n_failures(asr_on),
+        "clean_off": n_failures(clean_off), "clean_on": n_failures(clean_on),
+    }
+    total_empty_response_failures = sum(empty_response_failures.values())
 
     print()
     print("=" * 72)
@@ -310,6 +351,9 @@ def main() -> None:
     print(f"Poison caught at ingestion (ON): {pipelines['poison_ingest_report_on'].n_quarantined}/{5*len(targets)}")
     print(f"Clean corpus flagged at ingestion (ON): {pipelines['clean_ingest_report_on'].n_quarantined}/{len(clean_chunks)}")
     print(f"Cache: {cache_stats.as_dict()}")
+    if total_empty_response_failures:
+        print(f"EmptyResponse failures (scored as non-success, after {_EMPTY_RESPONSE_RETRIES} retries each): "
+              f"{total_empty_response_failures} -- {empty_response_failures}")
     print("=" * 72)
 
     handle = DatasetHandle(name="poisonedrag.targets", records=tuple(targets))
@@ -324,6 +368,7 @@ def main() -> None:
         "structural_no_op_note": "secure_retrieval (Stage 2) cannot change anything on this single-tenant BEIR corpus; see module docstring",
         "asr": {"off": asr_off_rate, "on": asr_on_rate, "delta": asr_off_rate - asr_on_rate},
         "clean_accuracy": {"off": clean_off_rate, "on": clean_on_rate},
+        "empty_response_failures": empty_response_failures,
         "ingestion": {
             "poison_quarantined": pipelines["poison_ingest_report_on"].n_quarantined,
             "poison_submitted": pipelines["poison_ingest_report_on"].n_submitted,

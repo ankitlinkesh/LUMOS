@@ -45,8 +45,36 @@ from triad.stage1 import directive as stage1a
 
 __all__ = [
     "DefenseConfig", "IngestReport", "ChunkTrace", "Trace", "Answer", "Pipeline",
-    "build_prompt", "MULTIPLE_PROMPT", "DECLINE_ANSWER",
+    "build_prompt", "MULTIPLE_PROMPT", "DECLINE_ANSWER", "add_in_batches",
 ]
+
+_FALLBACK_BATCH_SIZE = 4096  # used only if the client can't report its own cap
+
+
+def add_in_batches(store: TenantStore, chunks: Sequence[Chunk], embeddings: np.ndarray) -> int:
+    """``TenantStore.add`` in a single call over a large corpus exceeds
+    chromadb's own per-request batch cap (measured against chromadb 1.5.9's
+    Rust client: 5461 rows) -- this is exactly what stopped the first
+    PoisonedRAG headline-scale run (a 10,117-chunk clean corpus) after its
+    48-minute embedding step had already completed, discarding all of it.
+
+    Splits ``chunks``/``embeddings`` into batches of ``store.client.
+    get_max_batch_size()`` (queried live, not hardcoded, so this keeps working
+    if chromadb's cap changes) and sums the rejected-count across calls. A
+    quarantined chunk is still rejected exactly once, by whichever batch it
+    falls into -- ``TenantStore.add``'s own per-chunk check doesn't change
+    when it runs in smaller pieces.
+    """
+    if len(chunks) == 0:
+        return 0
+    try:
+        batch_size = max(1, int(store.client.get_max_batch_size()))
+    except Exception:
+        batch_size = _FALLBACK_BATCH_SIZE
+    rejected = 0
+    for i in range(0, len(chunks), batch_size):
+        rejected += store.add(chunks[i:i + batch_size], embeddings[i:i + batch_size])
+    return rejected
 
 DECLINE_ANSWER = "I don't have enough of your documents to answer that."
 
@@ -279,7 +307,7 @@ class Pipeline:
                 to_add_embeddings.append(embeddings[i])
 
         if to_add:
-            rejected = self.store.add(to_add, np.stack(to_add_embeddings))
+            rejected = add_in_batches(self.store, to_add, np.stack(to_add_embeddings))
             if rejected:  # defense-in-depth backstop tripped: a bug upstream let a quarantined chunk through
                 raise RuntimeError(f"TenantStore rejected {rejected} chunk(s) this pipeline believed were clean")
             self._reference_embeddings.extend(to_add_embeddings)

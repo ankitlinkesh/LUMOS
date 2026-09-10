@@ -140,10 +140,34 @@ claim.
 
 ### Attack success rate, before → after
 
-**PENDING.** Only an n=2 smoke run exists (`results/poisonedrag_n2_20260910T113806Z.json`: ASR
-1.0 → 0.5 on two targets), which is far too small to report. A reportable-scale replay — 100
-targets against a ≥10k-passage BEIR NQ corpus — is running now. This row is deliberately left
-visible rather than omitted.
+**NOT REPORTABLE — the run completed but is invalid.** A 50-target run against a 10,117-passage
+BEIR NQ corpus (poison ratio 2.4%, Contriever, k=5) finished and produced
+`results/poisonedrag_n50_20260910T143808Z.json`, showing ASR 0.70 → 0.56 and clean accuracy
+**0% OFF vs 46% ON**.
+
+That clean-accuracy asymmetry is impossible as stated — a defense removes documents, so it cannot
+raise clean QA accuracy from zero — and inspecting the per-target records shows why: **every one of
+the 50 `clean_off` probes retrieved `n_retrieved: 0`**, so the model correctly answered "I don't
+have enough of your documents to answer that." The defense-OFF clean condition retrieved nothing at
+all. The 46% is not a gain; the 0% is a broken retrieval path.
+
+It is also **non-deterministic**. Two n=10 runs written three seconds apart, same code and same
+seed, disagree: `poisonedrag_n10_20260910T142421Z.json` has `clean_off` retrieving 0 documents for
+all 10 targets, while `poisonedrag_n10_20260910T142424Z.json` has it retrieving 5 for all 10 — with
+byte-identical ASR numbers in both. Whatever the cause, it is intermittent, and it silently empties
+a retrieval condition rather than erroring.
+
+Ruled out so far: `add_in_batches` (verified against real chromadb 1.5.9 — 10,117 chunks in,
+0 rejected, all present); `EphemeralClient` cross-store contamination (uuid-suffixed collection
+names, verified isolated across four sequential clients); garbage collection of the client
+(`TenantStore.client` is a held dataclass field).
+
+The ASR figures from this run (0.70 → 0.56) are **not** being quoted. They share the same
+store-construction path as the condition that silently returned nothing, and no number from this run
+is trustworthy until the empty-retrieval cause is found. The earlier n=2 smoke run
+(`poisonedrag_n2_20260910T113806Z.json`, ASR 1.0 → 0.5) remains too small to report.
+
+This is the headline number the evaluation still owes.
 
 ## Reproducibility caveats
 
