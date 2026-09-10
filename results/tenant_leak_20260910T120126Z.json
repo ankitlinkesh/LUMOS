@@ -1,0 +1,64 @@
+{
+  "script": "tenant_leak",
+  "written_at_utc": "20260910T120126Z",
+  "git": {
+    "hash": "f566c97b891e297815d73ac7301cb5f5bdad0697",
+    "dirty": true
+  },
+  "data_composition": "enronqa.emails: 3,277 real",
+  "data_source": "real",
+  "embedder": {
+    "name": "BAAI/bge-small-en-v1.5",
+    "dim": 384,
+    "space": "cosine"
+  },
+  "n_tenants": 20,
+  "tenants": [
+    "allen-p",
+    "arora-h",
+    "badeer-r",
+    "bailey-s",
+    "benson-r",
+    "carson-m",
+    "causholli-m",
+    "crandell-s",
+    "cuilla-m",
+    "davis-d",
+    "dean-c",
+    "delainey-d",
+    "donoho-l",
+    "donohoe-t",
+    "dorland-c",
+    "ermis-f",
+    "fischer-m",
+    "forney-j",
+    "gang-l",
+    "gay-r"
+  ],
+  "n_probes": 500,
+  "k": 5,
+  "seed": 0,
+  "pairing_method": "nearest topic centroid (cosine over indexed corpus embeddings)",
+  "leaky_retriever": {
+    "n": 500,
+    "leak_rate_gold_specifically": 0.522,
+    "leak_rate_any_foreign_chunk": 0.676,
+    "leak_rate_shared_helper_cross_check": 0.676,
+    "decline_rate": 0.0,
+    "latency_ms_p50": 287.9233999992721,
+    "latency_ms_p95": 429.30259999411646,
+    "latency_ms_mean": 283.068097000476
+  },
+  "secure_retriever": {
+    "n": 500,
+    "leak_rate_gold_specifically": 0.0,
+    "leak_rate_any_foreign_chunk": 0.0,
+    "leak_rate_shared_helper_cross_check": 0.0,
+    "decline_rate": 0.0,
+    "latency_ms_p50": 207.07889999903273,
+    "latency_ms_p95": 289.43779999099206,
+    "latency_ms_mean": 209.49091219968977
+  },
+  "added_latency_ms_p50_secure_minus_leaky": -80.84450000023935,
+  "corpus_build_seconds": 1772.0107107999938
+}
