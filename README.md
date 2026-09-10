@@ -169,11 +169,74 @@ carry these thresholds across unchanged.
 
 ### Stage 3 — output and egress
 
-**Paused** by decision, to finish stages 1 and 2 first. The code exists and is tested
-(`triad/stage3/`: URL-taint egress check, rendering-boundary sanitizer, tool-call authorization,
-`[UNTRUSTED DATA]` fencing; the egress property test is mutation-verified — it fails when the taint
-check is disabled). It has **no end-to-end measured numbers yet**, and is not part of any headline
-claim.
+`results/egress_20260910T190656Z.json` · the first end-to-end measurement of `triad/stage3/`.
+
+**Mutation check first, both guards, real code path:** fed a crafted exfiltration attempt and
+confirmed each guard catches it, fed a crafted clean equivalent and confirmed each guard passes it.
+`authorize_tool_call`: caught ✓ / passed ✓. `inspect_answer`: caught ✓ / passed ✓. Only after both
+passed did any number below get trusted.
+
+**The headline finding reshapes what "egress" means for this attack set.** The 222 held-out
+LLMail-Inject phase-2 attacks (same set as Stage 1A, above) contain **zero URL-shaped exfiltration
+vectors** — checked with Stage 3's own reference extractor over subject+body, plus a bare-`www.`
+form it doesn't look for: 0/222. All 222 instead try to make the model *call a tool*,
+`send_email(to="contact@contact.com", body="confirmation")` — the challenge's own fixed target and
+payload; "confirmation" appears in all 222 texts, a literal `contact@contact.com` in 205/222, and
+the other 17 obfuscate the same address (fullwidth Unicode, "contact (at) contact.com") rather than
+using a different one. So `inspect_answer` (the URL/rendering-boundary checker) has a **structurally
+empty denominator** here — n=0, not a rate, not 100%, not a blank — and `authorize_tool_call`
+(tool-call authorization), not the module this section is named after, is the real mechanism these
+attacks target and this section's headline number.
+
+**(a) Attack-payload measurement — full N=222, no LLM, an upper bound, NOT the end-to-end claim.**
+The attacker's own intended call is handed straight to `authorize_tool_call`, with the attack email
+as context and a fixed benign user request that never asks for any email to be sent:
+**100% neutralized (222/222)**. This proves what Stage 3 does *once a model has already decided* to
+make that exact call — it says nothing about whether a model would. Decomposed: 205/222 are caught
+by the strong data-flow signal (`context_only_destination` — the address is literally traced into
+the retrieved chunk); the 17 obfuscated ones are missed by that signal and caught only by the weaker
+catch-all backstop (`unrequested_destination` — fires on any unrequested destination once untrusted
+content is present at all). That split is itself a finding: trivial address obfuscation defeats the
+strong signal and survives only because the backstop is unconditional.
+
+**(b) Model-generated measurement — bounded subsample, n=40, real Groq calls, the actual end-to-end
+claim.** Each sampled attack was fenced with Stage 3's own `wrap_untrusted`, handed to
+`openai/gpt-oss-20b` with the same benign user request, and the model's own text answer was parsed
+for an attempted `send_email` call. **Of 40 sampled, 23 calls errored** (Groq rejected the
+prompted-JSON tool format against this model's native tool-routing — a harness/model incompatibility,
+not a defense result; recorded, not discarded) and **17 completed**. Of those 17: 14 attempted no
+tool call at all, and **3 attempted `send_email` — Stage 3 escalated all 3 (3/3)**. That is a real but
+tiny denominator; do not headline "100%" from it. Cost: 40 attempts, of which 17 completed calls
+(the 23 errors never returned a completion), 0 cache hits — fresh subsample, distinct seed=23.
+
+**FPR — the shippability number.** `authorize_tool_call` on ordinary business mail (203 LLMail-Inject
+benign + 300 held-out Enron, seed=11), destination always named explicitly in the user's own request
+so the destination check never fires:
+
+| Benign scenario | FPR |
+|---|---|
+| "email a summary of this to X" (forward-and-summarize) | **100% (503/503)** |
+| generic short reply, no context echoed | **0% (0/503)** |
+
+The 100% is driven entirely by `context_phrase_leak`: every retrieved chunk defaults to
+`taint.untrusted=True` in this system, and any ≥4-word phrase in an argument that came from context
+rather than the user's own words escalates. **The ordinary "summarize this email and send it"
+workflow is unconditionally escalated.** That is not a tuning knob this script pulled — it is what
+the shipped signal does today, reported as a finding, not fixed.
+
+`inspect_answer` on benign content containing a URL: 0/203 LLMail-Inject benign emails contain a URL
+at all (n=0, not measured); of 55/300 Enron emails that do:
+
+| Context given to the guard | FPR |
+|---|---|
+| the email's own text (matches production: `Pipeline.ask` calls `inspect_answer` with no `allow_hosts`) | **43.6% (24/55)** |
+| unrelated/no context | **20% (11/55)** |
+
+Every block in both rows was a `tainted_link` de-link, never an image removal. The 20% floor with
+*no* matching context at all is driven by the standalone high-entropy check (a long, no-space,
+high-entropy URL parameter — an ordinary tracking token — trips it on its own); the extra 23.6% in
+the self-context row is the email quoting its own URL back, which self-matches trivially. Both are
+real false-positive drivers on ordinary mail, not artifacts of a favorable harness setup.
 
 ### Attack success rate, before → after
 
