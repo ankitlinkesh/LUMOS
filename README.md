@@ -365,6 +365,7 @@ never touch the real file — they build temp files with fake keys.
   sources that cite no primary result. Either someone finds the real source or it does not get
   quoted — and note the secondary framing also conflates *retrieval* success (the passage reaches
   top-k) with *end-to-end* attack success, which are different metrics.
-- **A perplexity-filter baseline.** The plan called for a GPT-2-small perplexity ROC on our own
-  poisoned/clean set, to reproduce the PS's claim that perplexity filtering is insufficient rather
-  than cite it. It was never built. We currently rely on the PoisonedRAG paper's own finding.
+- **A perplexity-filter baseline was deliberately dropped from scope.** The plan called for a
+  GPT-2-small perplexity ROC on our own poisoned/clean set. We cite the PoisonedRAG paper's own
+  measurement instead — it already reports perplexity filtering as having high FPR at usable TPR,
+  and reproducing a result the source paper states is lower value than the measurements above.
