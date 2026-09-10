@@ -281,3 +281,88 @@ def test_stage3_disabled_never_imports_or_calls_stage3_egress(store, embedder, q
 
     answer = pipeline.ask("quarterly budget review meeting notes", Scope.of("alice"))
     assert answer.text  # completed without ever touching the poisoned egress module
+
+
+# -- collapse_topk is wired correctly through ask() --------------------------
+#
+# Every test above that calls ask() with a single ingested chunk exercises
+# collapse_topk's n < 2 short-circuit, which returns before ever calling
+# embed_fn -- so a broken embed_fn (e.g. embed_query passed where a batch
+# function is required) never gets invoked and the whole suite stayed green.
+# These two tests are the ones that would have caught it: one drives >= 2
+# near-duplicate chunks through the real geometry module and checks collapse
+# actually happened, the other pins the batch-callable contract directly.
+
+def test_collapse_topk_actually_collapses_through_ask(store, embedder, quarantine):
+    pytest.importorskip("triad.stage1.geometry")
+    pipeline = make_pipeline(store, embedder, quarantine)  # DefenseConfig() defaults collapse_topk=True
+    dup_text = "Quarterly budget review scheduled for Friday afternoon in the main conference room."
+    other_text = "The office holiday party is next month in the downtown venue."
+    pipeline.ingest([
+        make_chunk("dup-1", "alice", dup_text),
+        make_chunk("dup-2", "alice", dup_text),
+        make_chunk("dup-3", "alice", dup_text),
+        make_chunk("other", "alice", other_text),
+    ])
+
+    answer = pipeline.ask("quarterly budget review Friday conference room", Scope.of("alice"), k=10)
+
+    collapse_decisions = [d for d in answer.decisions if d.stage == "retrieve"]
+    assert len(collapse_decisions) == 1
+    decision = collapse_decisions[0]
+
+    # The fail-closed escalate path (geometry.py's `except Exception` handler)
+    # must NOT have fired -- that is exactly what a broken embed_fn produced
+    # before this fix: no crash visible anywhere, just an inert defense.
+    assert decision.allow is True
+    assert decision.escalate is False
+    assert "internal_error" not in decision.evidence
+
+    # The three identical dup-* chunks must have collapsed into one cluster.
+    assert decision.evidence["num_clusters_collapsed"] >= 1
+    assert decision.evidence["original_count"] == 4
+    assert decision.evidence["collapsed_count"] < decision.evidence["original_count"]
+
+    # And the collapse must have actually reduced what reaches the prompt --
+    # the pipeline's post-collapse `result` is what ends up as answer.retrieval.
+    assert len(answer.retrieval.chunks) == decision.evidence["collapsed_count"]
+    assert len(answer.retrieval.chunks) < 4
+
+
+def test_collapse_topk_called_with_batch_capable_embed_fn(store, embedder, quarantine, monkeypatch):
+    import importlib
+
+    # Look the module up exactly the way triad.pipeline._stage1b_module() does
+    # (via sys.modules, by name) rather than `from triad.stage1 import
+    # geometry` -- an earlier test in this file replaces sys.modules entries
+    # directly (bypassing the import machinery), which can leave the parent
+    # package's `.geometry` attribute pointing at a stale module object while
+    # sys.modules holds the current one. Patching the stale object would make
+    # this test silently observe nothing, which is exactly the false-green
+    # failure mode this suite is trying to avoid.
+    geometry = importlib.import_module("triad.stage1.geometry")
+
+    real_collapse_topk = geometry.collapse_topk
+    captured: dict = {}
+
+    def spy(result, embed_fn, *, sim_threshold):
+        captured["embed_fn"] = embed_fn
+        return real_collapse_topk(result, embed_fn, sim_threshold=sim_threshold)
+
+    monkeypatch.setattr(geometry, "collapse_topk", spy)
+
+    pipeline = make_pipeline(store, embedder, quarantine)
+    pipeline.ingest([
+        make_chunk("c1", "alice", "quarterly budget review numbers"),
+        make_chunk("c2", "alice", "quarterly budget review figures"),
+    ])
+    pipeline.ask("quarterly budget review", Scope.of("alice"), k=10)
+
+    assert "embed_fn" in captured
+    # This is the contract that broke: embed_fn must accept a BATCH (a list
+    # of texts) and return one vector per text. `embed_query` (a single-string
+    # function) raises immediately when called this way -- HashEmbedder's
+    # raises AttributeError (list has no .lower()), SentenceTransformerEmbedder's
+    # raises TypeError (str + list). Either regression fails this assertion.
+    vecs = captured["embed_fn"](["first text here", "second text here"])
+    assert len(vecs) == 2

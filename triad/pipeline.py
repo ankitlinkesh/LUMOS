@@ -383,7 +383,7 @@ class Pipeline:
             geometry = _stage1b_module()
             if geometry is not None:
                 result, collapse_decision = geometry.collapse_topk(
-                    result, self.embedder.embed_query, sim_threshold=self.collapse_sim_threshold,
+                    result, self.embedder.embed_documents, sim_threshold=self.collapse_sim_threshold,
                 )
                 decisions.append(collapse_decision)
 
