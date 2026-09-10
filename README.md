@@ -328,3 +328,17 @@ never touch the real file — they build temp files with fake keys.
 - LLMail-Inject, IEEE SaTML 2025 · [arXiv:2506.09956](https://arxiv.org/html/2506.09956v1)
 - EnronQA · [arXiv:2505.00263](https://arxiv.org/html/2505.00263) — BIPIA · [arXiv:2312.14197](https://arxiv.org/abs/2312.14197) — BEIR · [arXiv:2104.08663](https://arxiv.org/pdf/2104.08663)
 - OWASP [LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
+
+### Claims we could NOT source — do not put these on a slide
+
+- **"Poisoning 0.04% of a corpus yields 98.2% attack success."** This figure appears in the problem
+  statement itself and in several blog posts, and web search attributes it to Phantom
+  ([arXiv:2405.20485](https://arxiv.org/html/2405.20485v2)). **It is not in that paper.** Checked
+  v2 directly: no 0.04%, no 98.2%, no 74.6% refusal figure; its refusal-to-answer results run
+  6.7%–93.3% across trigger/model pairs. The number is currently traceable only to secondary
+  sources that cite no primary result. Either someone finds the real source or it does not get
+  quoted — and note the secondary framing also conflates *retrieval* success (the passage reaches
+  top-k) with *end-to-end* attack success, which are different metrics.
+- **A perplexity-filter baseline.** The plan called for a GPT-2-small perplexity ROC on our own
+  poisoned/clean set, to reproduce the PS's claim that perplexity filtering is insufficient rather
+  than cite it. It was never built. We currently rely on the PoisonedRAG paper's own finding.
