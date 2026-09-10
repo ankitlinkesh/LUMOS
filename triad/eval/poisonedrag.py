@@ -206,6 +206,69 @@ def build_stores(embedder, clean_chunks, clean_embeddings, poison_chunks, defens
     }
 
 
+_STORE_NAMES = ("off_clean", "off_poisoned", "on_clean", "on_poisoned")
+
+
+def assert_stores_healthy(pipelines: dict, probe_question: str, scope: Scope) -> None:
+    """PRE-FLIGHT GUARD, run right after ``build_stores`` and before any LLM
+    calls: for each of the four stores, checks ``store.count() > 0`` AND that
+    a real probe retrieval (the first target's own question) returns at least
+    one chunk. Raises ``SystemExit`` naming the exact failing condition.
+
+    This exists because of a confirmed silent failure: a populated store
+    (``count()`` correct) can still retrieve zero chunks for a query that
+    matches its contents -- see ``triad.retrieval.store.TenantStore.
+    _scored_from_query_result``'s own guard for one confirmed mechanism, and
+    the module docstring above for the wider incident this postmortems.
+    Catching it HERE, before any of the (slow, quota-consuming) LLM calls
+    run, is strictly better than the second guard right before the results
+    file is written -- but that second guard stays too, since a store that
+    passes this cheap probe can still misbehave on a *different* question
+    later (both are real, independent checks)."""
+    for name in _STORE_NAMES:
+        pipeline = pipelines[name]
+        store = pipeline.store
+        if store.count() <= 0:
+            raise SystemExit(
+                f"poisonedrag guard: store '{name}' is empty (count()=0) right after being built -- "
+                "refusing to proceed with a run that would score an empty condition"
+            )
+        retriever = pipeline._retriever()
+        probe = retriever.retrieve(probe_question, scope, k=5)
+        if not probe.chunks:
+            raise SystemExit(
+                f"poisonedrag guard: store '{name}' has {store.count()} chunks but a probe retrieval for "
+                f"{probe_question!r} returned 0 -- a populated store must never silently retrieve nothing. "
+                "Refusing to proceed; this run's numbers would be invalid (see the clean_off empty-retrieval "
+                "postmortem in this module's docstring)."
+            )
+
+
+def assert_all_conditions_retrieved(per_target: dict[str, list[dict]]) -> None:
+    """THE MOST IMPORTANT GUARD (per the task brief): run right before
+    ``_common.write_results``, over EVERY probe in ALL FOUR conditions.
+    ``empty_response_failure`` rows are excluded -- their ``n_retrieved`` is
+    ``None`` (the LLM call itself failed after retries; that's a scored
+    failure, not a silent-empty-retrieval bug) -- but any remaining row with
+    ``n_retrieved == 0`` means a populated store retrieved nothing for a real
+    question, exactly the bug this whole module exists to never repeat.
+    Raises (never returns) so a condition that silently returned nothing can
+    never reach the results file, let alone get reported as a real number."""
+    broken: list[tuple[str, int, int]] = []
+    for condition_name, results in per_target.items():
+        zero_hits = [r for r in results if not r.get("empty_response_failure") and r.get("n_retrieved") == 0]
+        if zero_hits:
+            broken.append((condition_name, len(zero_hits), len(results)))
+    if broken:
+        detail = "; ".join(f"{name}: {n}/{total} probes retrieved 0 chunks" for name, n, total in broken)
+        raise RuntimeError(
+            f"poisonedrag guard: refusing to write results -- {detail}. A condition that silently "
+            "retrieved nothing must never be scored. Investigate the store/retriever before rerunning "
+            "(do not rerun blindly -- the earlier pre-flight guard already proved these stores worked "
+            "on at least one query, so this is a NEW failure worth diagnosing, not the same one)."
+        )
+
+
 _EMPTY_RESPONSE_RETRIES = 2  # extra attempts beyond the first, on a fresh (uncached) call each time
 
 
@@ -306,6 +369,10 @@ def main() -> None:
     print("Building stores (defense off: direct add; defense on: real Stage 1)...")
     pipelines = build_stores(embedder, clean_chunks, clean_embeddings, poison_chunks, defense_on, defense_off, quarantine_clean, quarantine_poisoned)
 
+    print("Guard: probing all four stores retrieve something for a real question before spending any LLM calls...")
+    assert_stores_healthy(pipelines, targets[0].question, Scope.of(PRINCIPAL))
+    print("  all four stores passed the pre-flight retrieval probe.")
+
     keys = load_keys()
     client = GroqClient(keys=keys, limiter=RateLimiter(), cache=DiskCache())
     cache_stats = _common.CacheStats()
@@ -389,6 +456,7 @@ def main() -> None:
         "cache_stats": cache_stats.as_dict(),
         "per_target": {"asr_off": asr_off, "asr_on": asr_on, "clean_off": clean_off, "clean_on": clean_on},
     }
+    assert_all_conditions_retrieved(payload["per_target"])
     _common.write_results(f"poisonedrag_n{len(targets)}", payload)
 
 

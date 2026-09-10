@@ -146,34 +146,60 @@ claim.
 
 ### Attack success rate, before → after
 
-**NOT REPORTABLE — the run completed but is invalid.** A 50-target run against a 10,117-passage
-BEIR NQ corpus (poison ratio 2.4%, Contriever, k=5) finished and produced
-`results/poisonedrag_n50_20260910T143808Z.json`, showing ASR 0.70 → 0.56 and clean accuracy
-**0% OFF vs 46% ON**.
+`results/poisonedrag_n100_20260910T153530Z.json` · **100 PoisonedRAG NQ targets** (500 adv_texts)
+against **10,117 real BEIR NQ passages**, poison ratio 4.7%, Contriever, k=5, generator
+`openai/gpt-oss-20b`. `TRIAD_REQUIRE_REAL=1` — no synthetic data anywhere in this run.
 
-That clean-accuracy asymmetry is impossible as stated — a defense removes documents, so it cannot
-raise clean QA accuracy from zero — and inspecting the per-target records shows why: **every one of
-the 50 `clean_off` probes retrieved `n_retrieved: 0`**, so the model correctly answered "I don't
-have enough of your documents to answer that." The defense-OFF clean condition retrieved nothing at
-all. The 46% is not a gain; the 0% is a broken retrieval path.
+| | Defense OFF | Defense ON |
+|---|---|---|
+| **Attack success rate** | **62.0%** | **47.0%** |
+| **Clean accuracy** | 46.0% | **46.0%** |
 
-It is also **non-deterministic**. Two n=10 runs written three seconds apart, same code and same
-seed, disagree: `poisonedrag_n10_20260910T142421Z.json` has `clean_off` retrieving 0 documents for
-all 10 targets, while `poisonedrag_n10_20260910T142424Z.json` has it retrieving 5 for all 10 — with
-byte-identical ASR numbers in both. Whatever the cause, it is intermittent, and it silently empties
-a retrieval condition rather than erroring.
+**ASR drops 15 points and clean accuracy is unchanged.** The clean tie is not a bug and not luck:
+Stage 1 flagged only 68 of 10,117 clean passages (0.67%) at ingestion, so removing under 1% of clean
+content plausibly changes no answers at this sample size. That is the RobustRAG criterion — a
+defense that buys robustness by wrecking clean QA is unshippable — and here the cost is zero within
+measurement error.
 
-Ruled out so far: `add_in_batches` (verified against real chromadb 1.5.9 — 10,117 chunks in,
-0 rejected, all present); `EphemeralClient` cross-store contamination (uuid-suffixed collection
-names, verified isolated across four sequential clients); garbage collection of the client
-(`TenantStore.client` is a held dataclass field).
+At ingestion, **153 of 500 poison chunks (30.6%) were quarantined**.
 
-The ASR figures from this run (0.70 → 0.56) are **not** being quoted. They share the same
-store-construction path as the condition that silently returned nothing, and no number from this run
-is trustworthy until the empty-retrieval cause is found. The earlier n=2 smoke run
-(`poisonedrag_n2_20260910T113806Z.json`, ASR 1.0 → 0.5) remains too small to report.
+**Be honest about the size of this win.** 47% ASR is still high: nearly half the attacks succeed.
+The defense meaningfully reduces the attack but does not defeat it, and the residual is what
+future work has to attack. Quote it as a 15-point reduction, never as "we stop PoisonedRAG."
 
-This is the headline number the evaluation still owes.
+All 396 real probes across all four conditions retrieved exactly 5 chunks. The 4 remaining rows are
+genuine Groq empty completions (retried 3×), labeled `empty_response_failure`, and are not counted
+as retrieval failures.
+
+#### The bug that made the earlier run invalid
+
+An earlier n=50 run reported clean accuracy "0% OFF vs 46% ON" — impossible, since a defense cannot
+raise clean accuracy from zero. Every defense-OFF clean probe had returned `n_retrieved: 0`. It was
+intermittent: two n=10 runs three seconds apart, same seed, disagreed.
+
+**The silent-failure mechanism is found and closed.** `TenantStore._scored_from_query_result` built
+its result list with `zip(ids, docs, metas, distances)`. `zip()` truncates to the shortest input, so
+a partial response from Chroma — `ids` populated but another list short — produced an **empty list
+with no error**, indistinguishable downstream from "nothing matched." It now raises `RuntimeError`
+naming the mismatched lengths.
+
+**The trigger is not fully proven, and we say so.** The evidence points to two eval processes having
+run concurrently: the two n=10 files each record ~70 s and ~68 s of clean-corpus ingest work, yet
+were written 3 seconds apart, which is only possible if they overlapped. Ruled out along the way:
+`EphemeralClient` LRU eviction (the non-persistent segment cache is an unconditional `BasicCache`),
+cross-store contamination, and client GC. 10+ full-process reproduction attempts could not force the
+race directly, and chromadb's Rust backend is opaque. So: the *mechanism* by which any partial
+response became a silent empty result is fixed and tested; the *upstream condition* that produced
+one remains a hypothesis.
+
+Two guards now make this class of bug impossible to ship again:
+
+- `assert_stores_healthy()` runs after the stores are built and before any LLM call — each of the
+  four stores must be non-empty **and** return results for a real probe query, or the run exits.
+- `assert_all_conditions_retrieved()` runs immediately before results are written — any probe with
+  `n_retrieved == 0` that is not a genuine LLM empty-completion aborts the run. **A condition that
+  silently returns nothing can no longer be scored.** This guard is mutation-verified: stubbing it
+  to `return` makes its regression test fail.
 
 ## Reproducibility caveats
 

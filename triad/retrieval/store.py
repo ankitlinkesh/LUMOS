@@ -185,6 +185,25 @@ class TenantStore:
         metas = result["metadatas"][0]
         distances = result["distances"][0]
 
+        # THE GUARD (see triad/eval/poisonedrag.py's silent-empty-retrieval
+        # postmortem): ``zip()`` over four lists silently stops at the
+        # shortest one. If the Chroma client ever returns ``ids`` populated
+        # but ``documents``/``metadatas``/``distances`` short or empty (a
+        # partial/degraded response from a resource-starved or racing query --
+        # observed empirically when two chromadb-backed eval processes ran
+        # concurrently on this machine), the old code silently produced an
+        # EMPTY scored-chunk list instead of an error: exactly the signature
+        # that made a defense look like it worked because a condition
+        # retrieved nothing. A populated store must never silently degrade to
+        # "found nothing" -- it must raise, loudly, right here at the source.
+        lengths = {"ids": len(ids), "documents": len(docs), "metadatas": len(metas), "distances": len(distances)}
+        if len(set(lengths.values())) != 1:
+            raise RuntimeError(
+                f"chromadb query() returned mismatched result lengths {lengths} -- "
+                "a partial/degraded response would otherwise silently become an "
+                "empty retrieval result. Never truncate via zip() over these lists."
+            )
+
         scored: list[ScoredChunk] = []
         for cid, doc, meta, dist in zip(ids, docs, metas, distances):
             chunk = _metadata_to_chunk(cid, doc, meta)
