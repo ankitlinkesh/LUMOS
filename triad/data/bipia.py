@@ -54,7 +54,17 @@ def load(task: str, split: str = "test", root: Path = DEFAULT_ROOT) -> list[Bipi
                 continue
             row = json.loads(line)
             context = row.get("context")
-            context = context if isinstance(context, str) else json.dumps(context)
+            if isinstance(context, list):
+                # The "code" task ships `context` as a list of lines (the Stack
+                # Overflow answer, one element per line) rather than a single
+                # string -- unlike email/table, which are already plain strings.
+                # Join them exactly as BIPIA's own upstream builder does
+                # (`"\n".join(normal_sample["context"])` in bipia/data/code.py)
+                # so a downstream scanner sees the actual code/prose text, not a
+                # JSON-escaped blob full of literal `\n` and quote characters.
+                context = "\n".join(str(line_) for line_ in context)
+            elif not isinstance(context, str):
+                context = json.dumps(context)
             record_id = f"{task}-{split}-{i}"
             out.append(BipiaRecord(
                 task=task,

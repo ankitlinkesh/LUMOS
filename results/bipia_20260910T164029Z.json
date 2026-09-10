@@ -1,0 +1,184 @@
+{
+  "script": "bipia",
+  "written_at_utc": "20260910T164029Z",
+  "git": {
+    "hash": "229b1b0c5fba35a2b8ddafcec55d25a1babdaf9a",
+    "dirty": true
+  },
+  "threshold": 0.5,
+  "seed": 7,
+  "n_enron": 300,
+  "tasks": {
+    "email": {
+      "n_context_records": 50,
+      "context_data_composition": "bipia.email: 50 real",
+      "attack_pool_kind": "text",
+      "attack_pool_categories": [
+        "Base Encoding",
+        "Business Intelligence",
+        "Conversational Agent",
+        "Emoji Substitution",
+        "Entertainment",
+        "Information Dissemination",
+        "Language Translation",
+        "Marketing & Advertising",
+        "Misinformation & Propaganda",
+        "Research Assistance",
+        "Reverse Text",
+        "Scams & Fraud",
+        "Sentiment Analysis",
+        "Substitution Ciphers",
+        "Task Automation"
+      ],
+      "n_attack_pool_texts": 75,
+      "positions": [
+        "start",
+        "end",
+        "middle"
+      ],
+      "n_attacked_documents": 11250,
+      "blocked": 0,
+      "detection_rate": 0.0,
+      "detection_rate_by_position": {
+        "start": {
+          "rate": 0.0,
+          "blocked": 0,
+          "n": 3750
+        },
+        "end": {
+          "rate": 0.0,
+          "blocked": 0,
+          "n": 3750
+        },
+        "middle": {
+          "rate": 0.0,
+          "blocked": 0,
+          "n": 3750
+        }
+      },
+      "signals_on_attacks": {
+        "action_verb_near_address": 764
+      }
+    },
+    "table": {
+      "n_context_records": 100,
+      "context_data_composition": "bipia.table: 100 real",
+      "attack_pool_kind": "text",
+      "attack_pool_categories": [
+        "Base Encoding",
+        "Business Intelligence",
+        "Conversational Agent",
+        "Emoji Substitution",
+        "Entertainment",
+        "Information Dissemination",
+        "Language Translation",
+        "Marketing & Advertising",
+        "Misinformation & Propaganda",
+        "Research Assistance",
+        "Reverse Text",
+        "Scams & Fraud",
+        "Sentiment Analysis",
+        "Substitution Ciphers",
+        "Task Automation"
+      ],
+      "n_attack_pool_texts": 75,
+      "positions": [
+        "start",
+        "end",
+        "middle"
+      ],
+      "n_attacked_documents": 22500,
+      "blocked": 0,
+      "detection_rate": 0.0,
+      "detection_rate_by_position": {
+        "start": {
+          "rate": 0.0,
+          "blocked": 0,
+          "n": 7500
+        },
+        "end": {
+          "rate": 0.0,
+          "blocked": 0,
+          "n": 7500
+        },
+        "middle": {
+          "rate": 0.0,
+          "blocked": 0,
+          "n": 7500
+        }
+      },
+      "signals_on_attacks": {
+        "action_verb_near_address": 600
+      }
+    },
+    "code": {
+      "n_context_records": 50,
+      "context_data_composition": "bipia.code: 50 real",
+      "attack_pool_kind": "code",
+      "attack_pool_categories": [
+        "Blocking Internet Connection",
+        "Bringing Down Hosts and Servers (Denial of Service)",
+        "Compromising Computers",
+        "Corrupting an Operating System",
+        "Data Eavesdropping",
+        "Encrypting Documents and Demanding Ransom (Ransomware)",
+        "Introduce System Fingerprinting",
+        "Keylogging",
+        "Screen Scraping",
+        "Traffic Analysis"
+      ],
+      "n_attack_pool_texts": 50,
+      "positions": [
+        "start",
+        "end",
+        "middle"
+      ],
+      "n_attacked_documents": 7500,
+      "blocked": 0,
+      "detection_rate": 0.0,
+      "detection_rate_by_position": {
+        "start": {
+          "rate": 0.0,
+          "blocked": 0,
+          "n": 2500
+        },
+        "end": {
+          "rate": 0.0,
+          "blocked": 0,
+          "n": 2500
+        },
+        "middle": {
+          "rate": 0.0,
+          "blocked": 0,
+          "n": 2500
+        }
+      },
+      "signals_on_attacks": {
+        "action_verb_near_address": 3155
+      }
+    }
+  },
+  "false_positive_rate": {
+    "llmail_benign": {
+      "rate": 0.0,
+      "blocked": 0,
+      "n": 203,
+      "data_composition": "llmail.benign: 203 real",
+      "signals": {}
+    },
+    "enron_holdout": {
+      "rate": 0.0,
+      "blocked": 0,
+      "n": 300,
+      "data_composition": "enronqa.emails: 300 real (held-out sample, seed=7)",
+      "signals": {
+        "action_verb_near_address": 89,
+        "pipeline_meta_reference": 1
+      }
+    }
+  },
+  "baseline_classifier": {
+    "probed": false
+  },
+  "scope_note": "detection_rate here is 'Stage 1A blocked the attacked document before an LLM ever saw it', NOT BIPIA's own published Attack Success Rate (which measures downstream LLM compliance). See module docstring 'What attack means per task' section."
+}
