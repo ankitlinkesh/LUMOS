@@ -25,10 +25,12 @@ function statusVariant(status: string): "neutral" | "red" | "green" | "amber" {
 }
 
 export default function TraceSection({
+  number,
   chunkId,
   onChunkIdChange,
   knownChunkIds,
 }: {
+  number: number;
   chunkId: string;
   onChunkIdChange: (id: string) => void;
   knownChunkIds: string[];
@@ -53,7 +55,7 @@ export default function TraceSection({
   return (
     <Panel
       id="trace"
-      number={3}
+      number={number}
       title="Taint-trace viewer"
       description="The life of one document: ingest, retrieve, prompt, egress. Click 'View trace' on any chunk above, or type a chunk id."
     >

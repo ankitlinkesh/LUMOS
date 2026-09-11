@@ -50,9 +50,11 @@ function ProbeSideCard({
 }
 
 export default function ProbeSection({
+  number,
   tenants,
   onInspectChunk,
 }: {
+  number: number;
   tenants: Tenant[];
   onInspectChunk: (id: string) => void;
 }) {
@@ -73,7 +75,7 @@ export default function ProbeSection({
   return (
     <Panel
       id="probe"
-      number={4}
+      number={number}
       title="Cross-tenant probe"
       description="Fire the same probe as the defended retriever (secure) and the deliberately vulnerable baseline (leaky), side by side."
     >

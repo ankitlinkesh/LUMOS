@@ -483,7 +483,7 @@ python -m venv .venv
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 
-python -m pytest                       # 370 tests; network and slow excluded by default
+python -m pytest                       # 406 tests; network and slow excluded by default
 python -m pytest -m slow               # also loads real datasets and models
 ```
 
@@ -530,7 +530,9 @@ python -m triad.api --real --port 8812     # real Groq calls, live Enron/LLMail-
 
 Both commands above were run exactly as written and driven with `curl` against every `/api/*`
 route (not just checked via the test suite — a green suite here has previously proven storage
-without proving arrival).
+without proving arrival). Every route except `/api/meta` and `/api/login` now requires a session
+first — see "Roles and access control" below for the full login-then-curl walkthrough and the
+demo credentials.
 
 The UI is a React + Vite build served offline as static files by the same FastAPI app — **no second
 code path**. The banner is driven by `ui/src/App.tsx`: `showDemoBanner = meta?.service !== "real"`,
@@ -640,6 +642,149 @@ the comment above `_VALID_RESULT_FILES` for the full reasoning. Everything else 
 (the four known-invalid smoke/retry runs, plus any file never individually vetted for this table)
 is invisible to `/api/results` by construction, not by being individually excluded. Confirmed live:
 `GET /api/results` on the real server returns exactly those 2 rows, both `"fake": false`.
+
+## Roles and access control
+
+The demo API requires a login, and **every permission is enforced on the server** — the UI hides
+sections a role can't use, but that's cosmetic; a judge probing with `curl` gets the exact same
+403/401 the UI would have silently avoided. All of it lives in one module, `triad/api/auth.py`:
+one `POLICY` table maps every `(method, path)` to the roles allowed to call it, one `AuthService`
+class owns password checks, sessions, and the login throttle, and `triad/api/app.py`'s
+`_PolicyRoute` consults `POLICY` on every request before FastAPI even parses the body — so an
+unauthenticated POST gets 401 even if its JSON is garbage. This is identical for the fake and
+`--real` services: login, sessions, and `POLICY` sit above `DemoService`, which neither
+implementation's auth path ever sees.
+
+There are four roles: **employee** (one account per tenant), **dbmanager**, **securityhead**, and
+**ceo** (one shared account each).
+
+| Capability | employee | dbmanager | securityhead | ceo |
+|---|---|---|---|---|
+| `POST /api/ask` | own tenant only, **defense forced ON** | 403 | 403 | 403 |
+| `GET /api/tenants` | 403 | ✅ | ✅ | ✅ |
+| `GET /api/quarantine` | 403 | ✅ read-only | ✅ | **aggregate counts only** (per tenant + per flag, no ids/previews/reasons) |
+| `POST /api/quarantine/{id}/release` | 403 | **403** | ✅ | 403 |
+| `GET /api/trace/{id}` | **only chunks whose tenant == own tenant** | ✅ | ✅ | 403 |
+| `POST /api/probe` (the leaky baseline) | 403 | 403 | ✅ | 403 |
+| `GET /api/results` | 403 | 403 | ✅ | ✅ |
+| `GET /api/meta`, `/api/login`, static UI files | public | | | |
+
+Two things worth calling out about *why* the table is shaped this way, not just what it says:
+
+- **An employee cannot reach the leaky baseline.** `POST /api/ask` forces `defense=true` server-side
+  regardless of what the request body asks for — the OFF path is the deliberately vulnerable
+  retriever from the Cross-tenant probe panel, and it genuinely does return other tenants' mail. The
+  only account that can ever fire it is securityhead, through `POST /api/probe`, which runs both
+  sides side by side for exactly this reason (so the vulnerable path stays observable without being
+  generally reachable).
+- **Tenant scope comes from the session, never the request.** `post_ask` in `app.py` ignores
+  `AskRequest.tenant` whenever it disagrees with the session's own `tenant` and returns 403 instead
+  of silently substituting the correct value — a tampering attempt is visible, not quietly absorbed.
+  The same rule is why the **ceo** role, despite sitting above securityhead in the org chart, cannot
+  read a single employee's inbox: its quarantine view is `total`/`by_tenant`/`by_flag` counts,
+  computed server-side from the same `QuarantineItem` list every other role sees, with every id,
+  preview, and reason string (which quote real email text) stripped before serialization — never
+  redacted client-side, never present in the response to redact.
+- **Release requires securityhead, not dbmanager.** A dbmanager can see everything quarantined
+  (read-only) but cannot release anything — releasing back into a retrievable index is the
+  security-relevant action, so it needs a separate role from the one that merely administers the
+  store, i.e. separation of duties.
+
+**Sessions.** `POST /api/login` checks the password with PBKDF2-HMAC-SHA256
+(`hashlib.pbkdf2_hmac`, 200,000 iterations, a random 16-byte salt per user) compared with
+`hmac.compare_digest`, and returns the identical generic 401 for a wrong username, a wrong
+password, or an active lockout — a client can't distinguish any of the three from the response
+alone. On success it creates a random `secrets.token_urlsafe(32)` session token, held **in
+process memory** (a server restart logs everyone out — acceptable for a hackathon demo, called out
+here rather than left implicit) with an 8-hour expiry, and sets it as an `HttpOnly`,
+`SameSite=Strict` cookie — no `Secure` flag, because this demo is served over plain HTTP on
+localhost and `Secure` would make the browser silently drop the cookie; flip it on for a TLS
+deployment. Five failed logins for the same username lock that username out for 60 seconds
+(throttled by the username string itself, regardless of whether it exists, so lockout behavior
+can't be used to enumerate valid usernames). `POST /api/logout` deletes the session outright.
+`GET /api/me` returns `{username, role, tenant, permissions}`, where `permissions` is read straight
+out of the same `POLICY` table that enforces access, so it can never drift from what the server
+actually allows.
+
+A route with no `POLICY` entry **default-denies** (401 unauthenticated, 403 authenticated) rather
+than default-allowing, and `tests/test_auth.py::test_every_api_route_has_a_policy_entry` enumerates
+every route FastAPI actually registered and fails the build if one has no entry — mutation-tested by
+temporarily adding an unpoliced route directly to `app.py`'s `create_app`, confirming the test
+failed with exactly that route named in the assertion, then reverting.
+
+**Demo credentials — for the hackathon demo only.** These are not secrets in the `secrets/` sense
+(nothing production-critical depends on them); they exist so a judge can log in. Regenerate the
+committed hashes any time with `python scripts/gen_demo_users.py` (stdlib only, no new
+dependency) — it hashes the same passwords below with a fresh random salt and rewrites
+`triad/api/demo_users.json`, which holds only PBKDF2 hashes, never plaintext.
+
+| Username | Role | Tenant | Password |
+|---|---|---|---|
+| `allen-p` | employee | allen-p | `AllenDemo!2026` |
+| `arnold-j` | employee | arnold-j | `ArnoldDemo!2026` |
+| `arora-h` | employee | arora-h | `AroraDemo!2026` |
+| `badeer-r` | employee | badeer-r | `BadeerDemo!2026` |
+| `bailey-s` | employee | bailey-s | `BaileyDemo!2026` |
+| `bass-e` | employee | bass-e | `BassDemo!2026` |
+| `dbmanager` | dbmanager | — | `DbManagerDemo!2026` |
+| `securityhead` | securityhead | — | `SecurityHeadDemo!2026` |
+| `ceo` | ceo | — | `CeoDemo!2026` |
+
+The six employee usernames are EnronQA's own real tenant ids — the same ones `Pipeline.demo()`
+ingests under `--real` — so these accounts work unmodified against both services; confirmed live,
+`GET /api/tenants` as dbmanager on the real server returns exactly
+`allen-p, arnold-j, arora-h, badeer-r, bailey-s, bass-e`.
+
+A login-then-curl walkthrough (cookies persisted in a jar across calls):
+
+```
+$ curl -c jar.txt -X POST localhost:8812/api/login \
+    -H "Content-Type: application/json" \
+    -d '{"username":"securityhead","password":"SecurityHeadDemo!2026"}'
+{"username":"securityhead","role":"securityhead","tenant":null}
+
+$ curl -b jar.txt localhost:8812/api/me
+{"username":"securityhead","role":"securityhead","tenant":null,"permissions":[...]}
+
+$ curl -b jar.txt localhost:8812/api/tenants
+[{"id":"allen-p",...}, ...]
+
+$ curl -b jar.txt -X POST localhost:8812/api/probe \
+    -H "Content-Type: application/json" \
+    -d '{"as_tenant":"allen-p","target_tenant":"arnold-j"}'
+{"secure": {...}, "leaky": {...}, ...}
+```
+
+**Confirmed live against the running `--real` server** (all status codes below are the actual
+response, not the expected one — see the four session cookie jars used):
+
+```
+$ curl -o /dev/null -w '%{http_code}' localhost:8812/api/meta        -> 200 (public)
+$ curl -o /dev/null -w '%{http_code}' localhost:8812/api/tenants     -> 401 (no session)
+$ curl -o /dev/null -w '%{http_code}' localhost:8812/api/me          -> 401 (no session)
+
+# as employee allen-p (tenant allen-p)
+POST /api/ask   {tenant: allen-p}                     -> 200
+POST /api/ask   {tenant: allen-p, defense: false}      -> 200, "leak_mode": false  (still defended)
+POST /api/ask   {tenant: arnold-j}  <- tampered tenant  -> 403
+GET  /api/tenants                                       -> 403
+GET  /api/trace/<own allen-p chunk>                      -> 200
+GET  /api/trace/<a bailey-s chunk>  <- foreign tenant    -> 403 {"detail":"forbidden"} (no reason text)
+GET  /api/trace/does-not-exist-xyz  <- unknown, same code -> 403 (can't distinguish "foreign" from "unknown")
+POST /api/logout -> 200; GET /api/me afterward           -> 401
+
+# as dbmanager / securityhead / ceo
+GET  /api/tenants                    -> dbmanager 200, securityhead 200, ceo 200
+GET  /api/quarantine                 -> dbmanager 200 (full), securityhead 200 (full), ceo 200 (aggregate-only)
+POST /api/quarantine/{id}/release    -> dbmanager 403, securityhead 200
+POST /api/probe                      -> dbmanager 403, securityhead 200, ceo 403
+GET  /api/results                    -> dbmanager 403, securityhead 200, ceo 200
+```
+
+The `ceo` quarantine body on the same live server:
+`{"total":38,"by_tenant":{"bailey-s":10,"badeer-r":4,...},"by_flag":{"action_verb_near_address":8,"batch_cluster":17,...}}`
+— no `id`, `preview`, or `reasons` key anywhere in it, confirmed by grepping the raw response body
+for every id/preview/reason string the securityhead's full view of the same queue returns.
 
 ## Layout
 

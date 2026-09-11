@@ -13,7 +13,7 @@ function pct(x: number): string {
   return `${(x * 100).toFixed(0)}%`;
 }
 
-export default function ResultsSection() {
+export default function ResultsSection({ number }: { number: number }) {
   const [state, setState] = useState<State>({ status: "loading" });
 
   function load() {
@@ -29,7 +29,7 @@ export default function ResultsSection() {
   return (
     <Panel
       id="results"
-      number={5}
+      number={number}
       title="Results"
       description="Attack success rate before/after the defense, clean accuracy, added latency, and false-positive rate — never invented, only measured."
     >

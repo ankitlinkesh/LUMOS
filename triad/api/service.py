@@ -205,6 +205,13 @@ class DemoService(Protocol):
         """Return the chunk's life story, or None if chunk_id is unknown."""
         ...
 
+    def chunk_tenant(self, chunk_id: str) -> str | None:
+        """Return the chunk's tenant, or None if chunk_id is unknown. Used by
+        app.py to enforce an employee's trace-scoping *before* any trace
+        content (which may contain quoted email text) is ever assembled --
+        see the "Roles and access control" section of the README."""
+        ...
+
     def results_table(self) -> list[ResultRow]: ...
 
 
@@ -431,9 +438,16 @@ class FakeDemoService:
 
     # -- trace -----------------------------------------------------------
 
+    def _all_known_chunks(self) -> dict[str, Chunk]:
+        return {self._clean.id: self._clean, self._poison.id: self._poison,
+                self._poison2.id: self._poison2, **{c.id: c for c in self._foreign_docs.values()}}
+
+    def chunk_tenant(self, chunk_id: str) -> str | None:
+        c = self._all_known_chunks().get(chunk_id)
+        return c.tenant if c is not None else None
+
     def trace_for_chunk(self, chunk_id: str) -> list[ChunkTraceStep] | None:
-        all_chunks = {self._clean.id: self._clean, self._poison.id: self._poison,
-                      self._poison2.id: self._poison2, **{c.id: c for c in self._foreign_docs.values()}}
+        all_chunks = self._all_known_chunks()
         # release_quarantine may have removed it from the live queue, but its
         # trace history still exists — check the union above, not the queue.
         c = all_chunks.get(chunk_id)

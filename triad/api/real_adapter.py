@@ -465,6 +465,13 @@ class RealDemoService:
             return None
         return _chunk_trace_to_steps(chunk_trace, stage3_enabled=self._pipeline.defense.stage3_enabled)
 
+    def chunk_tenant(self, chunk_id: str) -> str | None:
+        # Reuses describe_chunk -- the same source trace_for_chunk reads --
+        # rather than a second lookup path, so this can never disagree with
+        # what trace_for_chunk would show for the same id.
+        chunk_trace = self._pipeline.describe_chunk(chunk_id)
+        return chunk_trace.tenant if chunk_trace is not None else None
+
     # -- results -----------------------------------------------------------
 
     def _read_allowlisted(self, filename: str) -> dict[str, Any] | None:
