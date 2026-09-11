@@ -725,7 +725,7 @@ never touch the real file — they build temp files with fake keys.
 - EnronQA · [arXiv:2505.00263](https://arxiv.org/html/2505.00263) — BIPIA · [arXiv:2312.14197](https://arxiv.org/abs/2312.14197) — BEIR · [arXiv:2104.08663](https://arxiv.org/pdf/2104.08663)
 - OWASP [LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
 
-### Claims we could NOT source — do not put these on a slide
+### Claims we could NOT source
 
 - **"Poisoning 0.04% of a corpus yields 98.2% attack success."** This figure appears in the problem
   statement itself and in several blog posts, and web search attributes it to Phantom
