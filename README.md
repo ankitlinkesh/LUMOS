@@ -1,4 +1,4 @@
-# TRIAD-RAG
+# LUMOS RAG
 
 **A three-stage integrity and access-control pipeline for RAG systems** — hackathon PS 3.
 
