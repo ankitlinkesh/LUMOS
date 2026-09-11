@@ -18,14 +18,14 @@ shape is visible:
                           token-flips the prefix (HotFlip) or drops it defeats
                           it, and it never fires when we replay the raw
                           released texts without the paper's own prepend.
+      batch_cluster       the document has at least three other close
+                          neighbours in the same ingestion batch. This catches
+                          the attack's five-related-chunk shape when wording
+                          has been paraphrased or the query prefix is gone.
       manifold_isolation  the document sits off the reference corpus's own
-                          manifold: its k-NN density against a clean
-                          background corpus is in the tail of what clean
-                          documents normally see among themselves. This is
-                          what has to carry the signal when query_echo is
-                          gone -- a corroborating text engineered to make one
-                          query's embedding land near it usually pays for that
-                          by drifting away from the rest of the corpus.
+                          manifold. It remains available for measurement but
+                          is disabled in the default path after held-out
+                          testing found worse-than-chance discrimination.
 
   collapse_topk -- at query time, on an already-retrieved top-k. PoisonedRAG's
                    attack ONLY works by outnumbering the corpus: 5 mutually
@@ -59,12 +59,16 @@ __all__ = [
     "to_taint",
     "query_echo_signal",
     "query_echo_sims_batch",
+    "batch_cluster_scores",
     "manifold_isolation_scores",
     "manifold_isolation_baseline",
     "THRESHOLD",
     "QUERY_ECHO_WEIGHT",
     "ISOLATION_WEIGHT",
     "QUERY_ECHO_SIM_THRESHOLD",
+    "BATCH_CLUSTER_SIM_THRESHOLD",
+    "BATCH_CLUSTER_WEIGHT",
+    "BATCH_CLUSTER_MIN_NEIGHBORS",
     "ISOLATION_PERCENTILE",
     "DEFAULT_KNN_K",
     "COLLAPSE_SIM_THRESHOLD",
@@ -76,11 +80,18 @@ __all__ = [
 # callers (and tests) that don't tune.
 # ---------------------------------------------------------------------------
 
-QUERY_ECHO_SIM_THRESHOLD = 0.80   # cosine(sentence, doc) at/above this = "dominates"
-ISOLATION_PERCENTILE = 0.05       # bottom 5% of the clean corpus's own k-NN density = "isolated"
+# Tuned on the DEV half of PoisonedRAG's NQ targets and 2,500 clean BEIR
+# passages: 0.30 is the sensitivity-maximizing point on the 0.30..0.95 sweep
+# that stays within the 3% DEV clean-FPR budget (53/2,500 = 2.12%). The
+# evaluator reports the full ROC; this value is never selected from holdout.
+QUERY_ECHO_SIM_THRESHOLD = 0.30   # cosine(sentence, doc) at/above this = "dominates"
+BATCH_CLUSTER_SIM_THRESHOLD = 0.90  # selected on DEV; max in-batch neighbour cosine
+BATCH_CLUSTER_MIN_NEIGHBORS = 3     # requires a four-document related group
+ISOLATION_PERCENTILE = 0.0        # disabled by default after held-out worse-than-chance result
 DEFAULT_KNN_K = 5
 
 QUERY_ECHO_WEIGHT = 0.6
+BATCH_CLUSTER_WEIGHT = 0.6
 ISOLATION_WEIGHT = 0.6
 THRESHOLD = 0.5   # each weight alone clears this: either signal is sufficient to quarantine
 
@@ -223,6 +234,26 @@ def query_echo_signal(text: str, doc_embedding: np.ndarray, embedder, *,
     return bool(sims[0] >= threshold), float(sims[0]), matched[0]
 
 
+def batch_cluster_scores(embeddings: np.ndarray, *, threshold: float = BATCH_CLUSTER_SIM_THRESHOLD) -> tuple[np.ndarray, np.ndarray]:
+    """Return each document's strongest *other* document cosine in its batch.
+
+    PoisonedRAG emits five related chunks per target, so this catches attacks
+    whose wording no longer contains a query-shaped opener. A one-document
+    ingestion batch has no neighbour and receives ``-1``; this is deliberately
+    a bulk-ingestion signal, not a claim about isolated uploads.
+    """
+    x = np.asarray(embeddings, dtype=np.float32)
+    if x.ndim != 2:
+        raise ValueError(f"embeddings must be 2-D, got {x.shape}")
+    if x.shape[0] < 2:
+        return (np.full(x.shape[0], -1.0, dtype=np.float32),
+                np.zeros(x.shape[0], dtype=np.int32))
+    x = _normalize(x)
+    sims = x @ x.T
+    np.fill_diagonal(sims, -1.0)
+    return sims.max(axis=1).astype(np.float32), (sims >= threshold).sum(axis=1)
+
+
 def ingest_scan(
     chunks: Sequence[Chunk],
     embeddings: np.ndarray,
@@ -230,6 +261,7 @@ def ingest_scan(
     reference_embeddings: np.ndarray,
     embedder,
     query_echo_threshold: float = QUERY_ECHO_SIM_THRESHOLD,
+    batch_cluster_threshold: float = BATCH_CLUSTER_SIM_THRESHOLD,
     isolation_percentile: float = ISOLATION_PERCENTILE,
     knn_k: int = DEFAULT_KNN_K,
     max_echo_sentences: int = 2,
@@ -237,11 +269,9 @@ def ingest_scan(
     baseline_seed: int = 0,
 ) -> list[GuardDecision]:
     """Score every chunk at ingestion time, before any query exists. Combines
-    query_echo and manifold_isolation with a threshold: each signal's weight
-    (0.6) alone clears the block threshold (0.5) -- deliberately NOT a
-    conjunction, because query_echo is expected to go dark on a paraphrased or
-    un-prefixed attack (see module docstring) and isolation has to be able to
-    quarantine on its own when that happens.
+    query_echo and batch_cluster with thresholds: either signal's weight alone
+    clears the block threshold. Manifold isolation is retained as an explicit
+    diagnostic but disabled by the default zero-percent cutoff.
 
     ``embeddings`` are the chunks' own already-computed document embeddings
     (parallel to ``chunks``); ``reference_embeddings`` is the clean background
@@ -266,7 +296,12 @@ def ingest_scan(
         echo_sim, echo_sentence = query_echo_sims_batch(texts, embeddings, embedder, max_sentences=max_echo_sentences)
         echo_fired = echo_sim >= query_echo_threshold
 
-        # --- signal 2: manifold isolation ---
+        # --- signal 2: related-document batch cluster ---
+        cluster_sim, cluster_neighbors = batch_cluster_scores(embeddings, threshold=batch_cluster_threshold)
+        cluster_fired = ((cluster_sim >= batch_cluster_threshold) &
+                         (cluster_neighbors >= BATCH_CLUSTER_MIN_NEIGHBORS))
+
+        # --- signal 3: manifold isolation (disabled by default) ---
         ref = np.asarray(reference_embeddings, dtype=np.float32) if reference_embeddings is not None else np.zeros((0, embeddings.shape[1]), dtype=np.float32)
         if ref.ndim == 2 and ref.shape[0] >= 2:
             density = manifold_isolation_scores(embeddings, ref, knn_k=knn_k)
@@ -293,6 +328,14 @@ def ingest_scan(
                     f"document (cosine={echo_sim[i]:.3f} >= {query_echo_threshold:.3f}): "
                     f"{echo_sentence[i]!r}"
                 )
+            if bool(cluster_fired[i]):
+                score += BATCH_CLUSTER_WEIGHT
+                fired.append("batch_cluster")
+                reasons.append(
+                    f"document is unusually close to another document in the ingestion batch "
+                    f"(cosine={cluster_sim[i]:.3f} >= {batch_cluster_threshold:.3f}, "
+                    f"{int(cluster_neighbors[i])} neighbours)"
+                )
             if bool(iso_fired[i]):
                 score += ISOLATION_WEIGHT
                 fired.append("manifold_isolation")
@@ -306,6 +349,9 @@ def ingest_scan(
                 "score": score,
                 "signals": tuple(fired),
                 "query_echo_sim": float(echo_sim[i]),
+                "batch_cluster_sim": float(cluster_sim[i]),
+                "batch_cluster_neighbors": int(cluster_neighbors[i]),
+                "batch_cluster_threshold": float(batch_cluster_threshold),
                 "manifold_density": float(density[i]),
                 "manifold_baseline_cutoff": cutoff,
             }

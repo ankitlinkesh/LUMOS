@@ -51,32 +51,51 @@ export default function App() {
   const showDemoBanner = meta?.service !== "real";
 
   return (
-    <div className="min-h-screen bg-white text-slate-900">
+    <div className="lumo-shell min-h-screen">
       {showDemoBanner && <DemoModeBanner note={meta?.note} />}
-      <header className="border-b border-slate-200 bg-slate-900 text-white">
-        <div className="mx-auto max-w-6xl px-6 py-8">
-          <p className="text-sm font-semibold uppercase tracking-widest text-slate-400">TRIAD-RAG</p>
-          <p className="mt-2 max-w-4xl text-2xl font-bold leading-snug sm:text-3xl">
-            &ldquo;A retrieved document may supply facts. It may never widen who sees what, trigger
-            an action, or send data out.&rdquo;
-          </p>
-        </div>
-        <nav className="border-t border-slate-800 bg-slate-950/40">
-          <div className="mx-auto flex max-w-6xl flex-wrap gap-1 px-6 py-2">
-            {NAV.map((n) => (
-              <a
-                key={n.id}
-                href={`#${n.id}`}
-                className="rounded-md px-3 py-1.5 text-sm font-medium text-slate-300 hover:bg-slate-800 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
-              >
-                {n.label}
-              </a>
-            ))}
+      <header className="lumo-header">
+        <div className="lumo-topbar">
+          <a href="#top" className="lumo-brand" aria-label="TRIAD-RAG home">
+            <span className="lumo-brand-mark" aria-hidden="true">✦</span>
+            <span>TRIAD<span className="lumo-brand-accent">/</span>RAG</span>
+          </a>
+          <div className="lumo-topbar-meta">
+            <span className={`lumo-status-dot ${meta?.service === "real" ? "is-live" : ""}`} />
+            <span>{meta?.service === "real" ? "LIVE PIPELINE" : "DEMO SERVICE"}</span>
+            <span className="lumo-divider" />
+            <span>SECURITY CONSOLE</span>
           </div>
+          <span className="lumo-version">STAGE 1 — 3</span>
+        </div>
+        <div id="top" className="lumo-hero">
+          <div>
+            <p className="lumo-kicker">RETRIEVAL SECURITY OPERATIONS</p>
+            <h1>Context stays scoped.<br /><span>Instructions stay contained.</span></h1>
+            <p className="lumo-hero-copy">
+              Observe how tainted documents are quarantined, tenant boundaries are enforced,
+              and egress is evaluated across the full retrieval path.
+            </p>
+          </div>
+          <div className="lumo-hero-orbit" aria-hidden="true">
+            <div className="lumo-orbit-ring ring-one" /><div className="lumo-orbit-ring ring-two" />
+            <div className="lumo-orbit-core">TRIAD<br /><small>GUARD</small></div>
+          </div>
+        </div>
+        <nav className="lumo-nav" aria-label="Security console sections">
+          {NAV.map((n, i) => (
+            <a key={n.id} href={`#${n.id}`}><span>{String(i + 1).padStart(2, "0")}</span>{n.label}</a>
+          ))}
         </nav>
       </header>
 
-      <main className="mx-auto max-w-6xl px-6 pb-24">
+      <div className="lumo-overview-strip">
+        <div><span className="lumo-stat-label">SERVICE</span><strong>{meta?.service === "real" ? "REAL PIPELINE" : "SYNTHETIC DEMO"}</strong></div>
+        <div><span className="lumo-stat-label">TENANTS IN SCOPE</span><strong>{tenantsState.status === "ok" ? tenantsState.tenants.length : "—"}</strong></div>
+        <div><span className="lumo-stat-label">ACTIVE CONTROLS</span><strong>INGEST · RETRIEVE · EGRESS</strong></div>
+        <div><span className="lumo-stat-label">DATA INTEGRITY</span><strong className="lumo-accent-text">TRACEABLE</strong></div>
+      </div>
+
+      <main className="lumo-main mx-auto max-w-6xl px-6 pb-24">
         {tenantsState.status === "loading" && (
           <div className="pt-10">
             <LoadingBox label="Loading tenants..." />
@@ -102,14 +121,14 @@ export default function App() {
         )}
       </main>
 
-      <footer className="border-t border-slate-200 bg-slate-50 py-6 text-center text-sm text-slate-500">
+      <footer className="lumo-footer">
         {/* Stage 3 is implemented and measured (see the README's "Stage 3 --
             output and egress" section) but whether it is switched ON for
             THIS build depends on how the server was started -- never assert
             a specific state here that this static string can't verify.
             The Ask/Trace panels' egress step shows the real, current
             enabled/disabled fact for this build. */}
-        TRIAD-RAG demo &middot; Stage 3 egress checks: see the Ask/Trace panels' egress step for this build&rsquo;s setting
+        TRIAD/RAG &middot; SECURE RETRIEVAL OBSERVABILITY &middot; Stage 3 egress checks: see the Ask/Trace panels
       </footer>
     </div>
   );

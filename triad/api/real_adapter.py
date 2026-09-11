@@ -154,7 +154,12 @@ def _trace_events(answer: Answer) -> tuple[TraceEvent, ...]:
     for decision in answer.decisions:
         api_stage = _CONTRACT_STAGE_TO_API_STAGE.get(decision.stage, decision.stage)
         status = "blocked" if not decision.allow else ("collapsed" if decision.evidence.get("collapsed") else "ok")
-        detail = "; ".join(decision.reasons) or ("answer rewritten" if decision.rewritten else "no change")
+        if decision.evidence.get("decisions"):
+            blocked = decision.evidence.get("blocked", ())
+            redacted = decision.evidence.get("redacted", ())
+            detail = f"context policy: blocked={len(blocked)}, redacted={len(redacted)}"
+        else:
+            detail = "; ".join(decision.reasons) or ("answer rewritten" if decision.rewritten else "no change")
         events.append(TraceEvent("-", api_stage, status, detail))
 
     if not any(d.stage == "egress" for d in answer.decisions):
@@ -305,7 +310,12 @@ class RealDemoService:
             return base
         adjusted = Pipeline(
             store=base.store, embedder=base.embedder, llm=base.llm,
-            defense=replace(base.defense, secure_retrieval=defense, collapse_topk=defense),
+            defense=replace(
+                base.defense,
+                secure_retrieval=defense,
+                collapse_topk=defense,
+                context_guard_enabled=defense,
+            ),
             quarantine=base.quarantine, generator_model=base.generator_model,
             max_tokens=base.max_tokens, collapse_sim_threshold=base.collapse_sim_threshold,
             clock=base.clock,

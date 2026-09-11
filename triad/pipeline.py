@@ -35,6 +35,7 @@ from typing import Any, Protocol, Sequence
 import numpy as np
 
 from triad.contract import Chunk, GuardDecision, RetrievalResult, TaintVerdict
+from triad.context_guard import ContextGuard, UserContext
 from triad.embed.base import Embedder
 from triad.llm import limits
 from triad.quarantine import QuarantineQueue
@@ -119,6 +120,7 @@ class DefenseConfig:
     stage1b: bool = True
     secure_retrieval: bool = True   # False -> LeakyRetriever, the vulnerable baseline
     collapse_topk: bool = True
+    context_guard_enabled: bool = True
     stage3_enabled: bool = False
 
 
@@ -386,6 +388,35 @@ class Pipeline:
                     result, self.embedder.embed_documents, sim_threshold=self.collapse_sim_threshold,
                 )
                 decisions.append(collapse_decision)
+
+        if self.defense.context_guard_enabled:
+            guarded = ContextGuard().guard(UserContext(tenant=result.tenant), result.chunks)
+            guard_evidence = {
+                "allowed": tuple(sc.chunk.id for sc in guarded.allowed),
+                "redacted": tuple(sc.chunk.id for sc in guarded.redacted),
+                "blocked": guarded.blocked,
+                "decisions": tuple({
+                    "chunk_id": d.chunk_id, "action": d.action,
+                    "reasons": d.reasons, "evidence": d.evidence,
+                } for d in guarded.decisions),
+            }
+            if not guarded.prompt_chunks:
+                decision = GuardDecision.block(
+                    "retrieve", "context policy blocked every retrieved chunk", evidence=guard_evidence,
+                )
+                decisions.append(decision)
+                declined = replace(
+                    result, chunks=(), declined=True,
+                    decline_reason="context policy blocked every retrieved chunk",
+                )
+                trace = Trace(tuple(
+                    self._trace_for(cid, tenant, retrieved=True, entered_prompt=False)
+                    for cid, tenant in original.items()
+                ))
+                return Answer(text=DECLINE_ANSWER, retrieval=declined, decisions=tuple(decisions), trace=trace, cached=False)
+            if any(d.action != "allow" for d in guarded.decisions):
+                decisions.append(GuardDecision.ok("retrieve", evidence=guard_evidence))
+            result = replace(result, chunks=guarded.prompt_chunks)
 
         entered_ids = {sc.chunk.id for sc in result.chunks}
 

@@ -38,6 +38,7 @@ from dataclasses import dataclass
 
 from triad.contract import GuardDecision, TaintVerdict
 from triad.stage1 import hidden_text
+from triad.stage1 import hygiene
 
 __all__ = ["scan", "to_taint", "THRESHOLD"]
 
@@ -180,6 +181,12 @@ def scan(text_or_chunk) -> GuardDecision:
 
     try:
         raw = _extract_raw(text_or_chunk)
+        hygiene_decision = hygiene.scan(raw)
+        if not hygiene_decision.allow:
+            # Keep the static findings as first-class Stage 1 evidence. The
+            # structural detector below still runs for clean hygiene input;
+            # high-confidence hidden/encoded content is blocked immediately.
+            return hygiene_decision
         report = hidden_text.extract(raw)
 
         visible_sig = _action_signals(report.visible_text)

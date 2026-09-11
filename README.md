@@ -24,6 +24,22 @@ Each stage is one tooth of that single rule, not an unrelated filter:
 Everything is a pure, deterministic function over frozen contract types with injectable
 dependencies (embedder, store, LLM). No LLM sits in the detection hot path.
 
+The current implementation also includes two deterministic controls inspired by recent open-source
+RAG security work:
+
+- **Document hygiene:** `triad/stage1/hygiene.py` catches bidirectional overrides, repeated
+  zero-width characters, hidden markup, and Base64 payloads that decode to instruction-override
+  text before the document is embedded.
+- **Context firewall:** `triad/context_guard.py` applies deny-first tenant/quarantine policy and
+  can redact secrets, SSNs, phone numbers, and optionally email addresses after retrieval but
+  before prompt assembly. Its per-chunk allow/redact/block evidence is included in the pipeline
+  decision trace. The vulnerable baseline disables it deliberately so leak measurements remain a
+  real comparison.
+
+These controls are covered by unit and integration tests. Their standalone detection rates on the
+real corpora are not claimed yet; the next evaluation should report their DEV/held-out catch and
+false-positive rates separately before any further threshold tuning.
+
 ## Measured results
 
 Every number below was produced by a script in this repo against **real published data**. Each
@@ -112,6 +128,39 @@ paraphrased prefix, (c) no prefix at all:
 
 False positives on the 2,500 held-out clean passages: query-echo 0.64%, manifold isolation 2.56%,
 combined 3.2%.
+
+#### Retuned ingestion detector — current implementation
+
+The original figures above are retained as the measured baseline. The detector was then retuned
+without touching held-out data: the 100 id-sorted PoisonedRAG targets are split into the first 50
+DEV targets and the second 50 held-out targets; the clean sample is split the same way. The query-
+echo threshold was selected on DEV only at **0.30**, the sensitivity-maximizing point within the
+3% DEV clean-FPR budget: **53/2,500 clean = 2.12%**. The 0.30–0.70 region was a plateau, so the
+lowest threshold was chosen to preserve sensitivity rather than to cherry-pick a held-out result.
+
+A second signal was added: `batch_cluster`. It normalizes the embeddings in an ingestion batch,
+finds each passage's close neighbours, and quarantines only when a passage has at least **three
+other neighbours** at cosine ≥ **0.90**. That four-document-group requirement matters: a normal
+three-copy duplicate set remains allowed, while PoisonedRAG's five related chunks can be caught.
+This is a bulk-ingestion signal; an isolated one-document upload has no neighbours and cannot be
+detected by this signal alone.
+
+The held-out geometry measurements for the new cluster signal were:
+
+| Signal / attack variant | Verbatim | Paraphrased | No-prefix | Clean FPR |
+|---|---:|---:|---:|---:|
+| `batch_cluster` alone | 238/250 (**95.2%**) | 227/250 (**90.8%**) | 92/250 (**36.8%**) | 4/2,500 (**0.16%**) |
+
+The latest exact end-to-end run caught **456/500 poison chunks (91.2%)** and flagged **205/10,117
+clean passages (2.03%)**. Poison catch and ASR stayed at the previous retuned values, while this
+run measured clean accuracy at **46% OFF -> 45% ON**. It did **not** improve ASR: the generator still
+succeeded on 12/100 defended targets. The honest conclusion is that ingestion catch and end-to-end
+attack success are not interchangeable metrics; the remaining failures occur downstream.
+
+`manifold_isolation` is now disabled in the default ingestion path (`ISOLATION_PERCENTILE = 0.0`).
+Its held-out poison catch was only 0.4–2.4% against a 1.36–4.88% clean-FPR range, so it was worse
+than chance and added false positives without useful marginal catch. Its scoring functions remain
+available for explicit analysis and regression tests; they were not deleted or hidden.
 
 Two findings here, both negative, both measured:
 
@@ -257,16 +306,26 @@ high-entropy URL parameter — an ordinary tracking token — trips it on its ow
 the self-context row is the email quoting its own URL back, which self-matches trivially. Both are
 real false-positive drivers on ordinary mail, not artifacts of a favorable harness setup.
 
-### Attack success rate, before → after
+### Attack success rate — historical baseline and current rerun
 
-`results/poisonedrag_n100_20260910T195905Z.json` · **100 PoisonedRAG NQ targets** (500 adv_texts)
+`results/poisonedrag_n100_20260910T224217Z.json` · **100 PoisonedRAG NQ targets** (500 adv_texts)
 against **10,117 real BEIR NQ passages**, poison ratio 4.7%, Contriever, k=5, generator
 `openai/gpt-oss-20b`. `TRIAD_REQUIRE_REAL=1` — no synthetic data anywhere in this run.
 
 | | Defense OFF | Defense ON |
 |---|---|---|
-| **Attack success rate** | **62.0%** (62/100) | **47.0%** (47/100) |
+| **Attack success rate** | **62.0%** (62/100) | **12.0%** (12/100) |
 | **Clean accuracy** | 46.0% (46/100) | 45.0% (45/100) |
+
+Current ingestion counters for this run were **456/500 poison quarantined (91.2%)** and
+**205/10,117 clean passages flagged (2.03%)**. The run used `TRIAD_REQUIRE_REAL=1`, real BEIR NQ
+and PoisonedRAG data, Contriever retrieval, k=5, and `openai/gpt-oss-20b`.
+
+The run had **6 empty Groq completions after retries** (2 in each defended/undefended ASR and
+clean arm) and therefore exited with code 1 after writing its JSON. Those rows were explicitly
+marked `empty_response_failure`; they were not treated as successful defenses or silently removed.
+
+#### Archived 47% defense run
 
 **This is the corrected measurement — collapse is now genuinely active.** An earlier run
 (`poisonedrag_n100_20260910T153530Z.json`, kept on disk, no longer surfaced by the UI) reported this
@@ -378,7 +437,7 @@ python -m venv .venv
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 
-python -m pytest                       # 294 tests; network and slow excluded by default
+python -m pytest                       # 370 tests; network and slow excluded by default
 python -m pytest -m slow               # also loads real datasets and models
 ```
 
@@ -404,11 +463,23 @@ python -m triad.eval.ablation        --n 10                           # one row 
 python -m triad.eval.report                                           # collate results/ into a table
 ```
 
+For reported real-data runs, keep model loading offline and require real data explicitly:
+
+```
+$env:HF_HUB_OFFLINE="1"
+$env:TRANSFORMERS_OFFLINE="1"
+$env:TRIAD_REQUIRE_REAL="1"
+python -m triad.eval.poisonedrag --n 100 --sample-n 10000
+```
+
+Do not run the ASR evaluator concurrently with another evaluator or the live API: they share the
+Groq key pool and are intentionally expensive.
+
 ## Demo UI
 
 ```
-python -m triad.api            # fake demo service, for UI development
-python -m triad.api --real     # the real pipeline, real Groq calls, live Enron/LLMail-Inject corpus
+python -m triad.api --port 8811            # fake demo service, for UI development
+python -m triad.api --real --port 8812     # real Groq calls, live Enron/LLMail-Inject corpus
 ```
 
 Both commands above were run exactly as written and driven with `curl` against every `/api/*`
@@ -436,8 +507,8 @@ error: --real could not build a working pipeline, so refusing to start ...
 (exit code 1 — no server, nothing to accidentally show unbannered)
 ```
 
-`triad/api/real_adapter.py` is now fully wired to the real `Pipeline` (all seven `DemoService`
-methods; `meta()` was the only one implemented before). Driven live end to end on the real EnronQA
+`triad/api/real_adapter.py` is fully wired to the real `Pipeline` (all seven `DemoService`
+methods). Driven live end to end on the real EnronQA
 corpus (6 tenants, real Stage 1 quarantine, real Groq generation):
 
 - `/api/ask` — real `SecureRetriever`/`LeakyRetriever` retrieval + a real Groq chat completion.
@@ -537,10 +608,10 @@ triad/
   stage1/            1A hidden_text + directive; 1B geometry; their eval drivers
   stage3/            egress, tool-call authorization, fencing  (measured; see Stage 3 above)
   eval/              the measurement harness, one module per experiment
-  api/               FastAPI app, demo service, real adapter (incomplete)
+  api/               FastAPI app, fake demo service, real adapter
   pipeline.py        end-to-end wiring
   quarantine.py      reviewable queue with a reason string and a release path — never deletion
-tests/               294 tests, incl. Hypothesis property tests for the Stage 2 invariant
+tests/               370 tests, incl. Hypothesis property tests for the Stage 2 invariant
 scripts/             dataset download + verification
 ui/                  React + Vite demo front end
 results/             timestamped measurement JSONs

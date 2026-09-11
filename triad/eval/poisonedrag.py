@@ -352,8 +352,8 @@ def main() -> None:
 
     poison_chunks = poison_chunks_for_targets(targets)
 
-    defense_off = DefenseConfig(stage1a=False, stage1b=False, secure_retrieval=False, collapse_topk=False, stage3_enabled=False)
-    defense_on = DefenseConfig(stage1a=True, stage1b=True, secure_retrieval=True, collapse_topk=True, stage3_enabled=False)
+    defense_off = DefenseConfig(stage1a=False, stage1b=False, secure_retrieval=False, collapse_topk=False, context_guard_enabled=False, stage3_enabled=False)
+    defense_on = DefenseConfig(stage1a=True, stage1b=True, secure_retrieval=True, collapse_topk=True, context_guard_enabled=True, stage3_enabled=False)
 
     from triad.quarantine import QuarantineQueue
     from triad.config import CACHE_DIR
