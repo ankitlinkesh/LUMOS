@@ -37,8 +37,11 @@ RAG security work:
   real comparison.
 
 These controls are covered by unit and integration tests. Their standalone detection rates on the
-real corpora are not claimed yet; the next evaluation should report their DEV/held-out catch and
-false-positive rates separately before any further threshold tuning.
+real corpora are not claimed yet. Two consequences to keep in mind when reading the numbers below:
+`hygiene.scan` now runs first inside `directive.scan` and returns early when it blocks, so **every
+Stage 1A figure below was measured before it existed**; and `context_guard` is enabled in the
+defended arm of the current ASR run, so that run's improvement is not attributable to ingestion
+alone. Neither has had a per-component ablation.
 
 ## Measured results
 
@@ -66,6 +69,12 @@ search. Security is not paying a latency tax here.
 `results/injection_20260910T121109Z.json` · LLMail-Inject **phase 2**, the held-out split, 222
 unique attacks that met *every* objective against Microsoft's deployed defenses (Prompt Shield,
 TaskTracker, Spotlighting, an LLM judge).
+
+> **Not re-measured since `hygiene.py` was added.** `directive.scan` now runs `hygiene.scan` first
+> (bidi overrides, zero-width runs, hidden markup, base64-encoded override instructions) and returns
+> its block immediately. The detection and false-positive figures in this section — including the
+> BIPIA result — predate that change. Hygiene can only add blocks, so detection can only rise, but so
+> can false positives: its base64 check has not been measured against real Enron mail.
 
 | Detector | Detection rate | FPR, 203 benign | FPR, 500 real Enron |
 |---|---|---|---|
@@ -149,10 +158,21 @@ The held-out geometry measurements for the new cluster signal were:
 
 | Signal / attack variant | Verbatim | Paraphrased | No-prefix | Clean FPR |
 |---|---:|---:|---:|---:|
+| `query_echo` at 0.30 | 230/250 (**92.0%**) | 125/250 (**50.0%**) | 2/250 (**0.8%**) | 42/2,500 (**1.68%**) |
 | `batch_cluster` alone | 238/250 (**95.2%**) | 227/250 (**90.8%**) | 92/250 (**36.8%**) | 4/2,500 (**0.16%**) |
 
+> **Provenance caveat:** unlike every other table in this README, the DEV sweep and the held-out rows
+> above have **no persisted results file**. They come from the tuning run's own report, and
+> `results/` holds no geometry JSON newer than `geometry_20260910T142941Z.json` (the baseline). Rerun
+> `python -m triad.stage1.eval_geometry` and cite its output before quoting these on a slide. No
+> combined `query_echo` + `batch_cluster` held-out figure was reported.
+
 The latest exact end-to-end run caught **456/500 poison chunks (91.2%)** and flagged **205/10,117
-clean passages (2.03%)**. Poison catch and ASR stayed at the previous retuned values, while this
+clean passages (2.03%)**. Two earlier runs of the same configuration (`220208Z`, `220602Z`) recorded
+456/500 poison and **188/10,117 (1.86%)** clean. The clean count varies by 17 across runs and that
+variation is not yet explained. `batch_cluster`'s 0.16% FPR was measured on BEIR passages only; on an
+email corpus, reply chains and forwards are near-copies of each other, so its false-positive rate on
+real mail is unmeasured and may be materially higher. Poison catch and ASR stayed at the previous retuned values, while this
 run measured clean accuracy at **46% OFF -> 45% ON**. It did **not** improve ASR: the generator still
 succeeded on 12/100 defended targets. The honest conclusion is that ingestion catch and end-to-end
 attack success are not interchangeable metrics; the remaining failures occur downstream.
@@ -162,11 +182,13 @@ Its held-out poison catch was only 0.4–2.4% against a 1.36–4.88% clean-FPR r
 than chance and added false positives without useful marginal catch. Its scoring functions remain
 available for explicit analysis and regression tests; they were not deleted or hidden.
 
-Two findings here, both negative, both measured:
+Two findings from the **baseline** detector (before the retune above), both negative, both measured:
 
 - **Ingest-time detection collapses under adaptation**: 34.4% → 6.8% → 2.4%. Query-echo is a cheap
   trap for the *published* attack, not a defense. An attacker who paraphrases the prefix costs us
-  five sixths of the catch rate; one who drops it costs us all of it.
+  five sixths of the catch rate; one who drops it costs us all of it. *Since the retune,
+  `batch_cluster` lifts the held-out figures to 95.2% / 90.8% / 36.8%, but only for bulk uploads,
+  and the no-prefix attacker still gets through nearly two times in three.*
 - **Manifold isolation does not work at all.** Its poison catch (0.4–2.4%) is *lower than its own
   clean false-positive rate* (1.36–4.88% across candidate cutoffs) — it is worse than chance on this
   data, and adding it to the combined score raises FPR from 0.64% to 3.2% for almost no catch gain.
@@ -312,10 +334,31 @@ real false-positive drivers on ordinary mail, not artifacts of a favorable harne
 against **10,117 real BEIR NQ passages**, poison ratio 4.7%, Contriever, k=5, generator
 `openai/gpt-oss-20b`. `TRIAD_REQUIRE_REAL=1` — no synthetic data anywhere in this run.
 
-| | Defense OFF | Defense ON |
+The ingestion threshold was selected on the first 50 id-sorted targets, so **the held-out 50 is the
+headline.** That split is our own (PoisonedRAG ships no train/test split), deterministic (targets
+sorted by id), and fixed before the retune.
+
+| Held-out 50 (never used for tuning) | Defense OFF | Defense ON |
 |---|---|---|
-| **Attack success rate** | **62.0%** (62/100) | **12.0%** (12/100) |
-| **Clean accuracy** | 46.0% (46/100) | 45.0% (45/100) |
+| **Attack success rate** | **54.0%** (27/50) | **8.2%** (4/49) |
+| **Clean accuracy** | 44.9% (22/49) | **44.9%** (22/49) |
+
+| All 100 targets (supporting) | Defense OFF | Defense ON |
+|---|---|---|
+| **Attack success rate** | 62.0% (62/100) | 12.2% (12/98) |
+| **Clean accuracy** | 46.9% (46/98) | 45.9% (45/98) |
+
+The tuning half alone: ASR 70.0% (35/50) → 16.3% (8/49). The defense does better on the half it never
+saw. Denominators exclude the 6 `empty_response_failure` rows (below). The results JSON's own `asr`
+field divides by 100 and so reports 12.0% / 46.0% / 45.0%, which counts an empty completion as a
+failed attack and slightly flatters the defense.
+
+**What is and is not isolated.** The defended arm enables the retuned ingestion detector (query-echo
+0.30 + `batch_cluster`), cluster collapse, `hygiene` (via `directive.scan`) and `context_guard`
+together. Collapse is measured separately as contributing nothing (see Stage 1B). No run turns
+`hygiene` or `context_guard` off on its own, so the 46-point held-out drop cannot yet be divided
+among them. On this single-tenant BEIR corpus `context_guard`'s tenant check is a no-op by
+construction; whether its quarantine block adds anything over ingestion has not been measured.
 
 Current ingestion counters for this run were **456/500 poison quarantined (91.2%)** and
 **205/10,117 clean passages flagged (2.03%)**. The run used `TRIAD_REQUIRE_REAL=1`, real BEIR NQ
@@ -327,7 +370,7 @@ marked `empty_response_failure`; they were not treated as successful defenses or
 
 #### Archived 47% defense run
 
-**This is the corrected measurement — collapse is now genuinely active.** An earlier run
+**Superseded by the retuned run above.** This was the corrected measurement at the time, with collapse genuinely active. An earlier run
 (`poisonedrag_n100_20260910T153530Z.json`, kept on disk, no longer surfaced by the UI) reported this
 same 62%→47% while cluster collapse was silently inert: `triad/pipeline.py` passed `collapse_topk` a
 single-string `embed_query` where the function requires a batch `embed_documents`, so every call
@@ -398,6 +441,9 @@ Two guards now make this class of bug impossible to ship again:
   before the next run so future results are clean.
 - There are two `injection_*` and two `tenant_leak_*` files. **The later timestamp in each pair is
   the live one**; the earlier is a smaller preliminary run kept for history.
+- There are six `poisonedrag_n100_*` files. **`224217Z` is the current headline.** `153530Z` had
+  collapse silently inert; `195905Z` is the corrected pre-retune run (62%→47%); `213715Z`, `220208Z`
+  and `220602Z` are retuned runs superseded by `224217Z`. All retuned runs report ASR 62%→12%.
 - `signals_on_enron_fp` shows `action_verb_near_address` firing on **126 of 500 real Enron emails**.
   Overall FPR is 0.0% only because that signal alone sits below the 0.5 quarantine threshold.
   Raising signal weights will cost false positives on real business mail first — that is the
@@ -605,11 +651,12 @@ triad/
   embed/             embedder interface; bge-small (real) and a hash embedder (fast tests)
   llm/               Groq key pool, official free-tier limiter, principal-keyed cache, doctor
   retrieval/         scope algebra, Chroma store, SecureRetriever + LeakyRetriever (the bug)
-  stage1/            1A hidden_text + directive; 1B geometry; their eval drivers
+  stage1/            1A hygiene + hidden_text + directive; 1B geometry (query_echo, batch_cluster); eval drivers
   stage3/            egress, tool-call authorization, fencing  (measured; see Stage 3 above)
   eval/              the measurement harness, one module per experiment
   api/               FastAPI app, fake demo service, real adapter
   pipeline.py        end-to-end wiring
+  context_guard.py   post-retrieval firewall: tenant/quarantine block, secret/SSN/phone redaction
   quarantine.py      reviewable queue with a reason string and a release path — never deletion
 tests/               370 tests, incl. Hypothesis property tests for the Stage 2 invariant
 scripts/             dataset download + verification
@@ -647,7 +694,15 @@ never touch the real file — they build temp files with fake keys.
 - Threat model: the attacker can write documents or send email, and is black-box to the retriever
   and the LLM. **The tenant identity comes from the authenticated session, never from the query.**
   Out of scope: a compromised embedder, a malicious administrator.
-- Stage 1B's ingest-time signals are weak under adaptation, by measurement.
+- Ingest-time poison detection now holds against paraphrase (90.8% held-out via `batch_cluster`) but
+  **not against an attacker who drops the question prefix (36.8%)**, and `batch_cluster` needs the
+  poison to arrive in one ingestion batch: five documents uploaded separately defeat it.
+- **No per-component ablation for the current defense.** The 54% → 8.2% held-out drop comes from
+  retuned ingestion, `hygiene` and `context_guard` switched on together.
+- **Stage 1A's published figures predate `hygiene.py`** and need a rerun (LLMail phase 2, BIPIA,
+  both benign FPR sets).
+- `batch_cluster`'s false-positive rate on real email, where reply chains are near-duplicates, is
+  unmeasured.
 - **There is a whole attack class this pipeline does not currently cover, and we would rather say it
   than be caught by it.** Stage 1A scores 0% on BIPIA-style injections (see above), and Stage 3 does
   not rescue them either — we checked rather than assumed. Stage 3's egress check acts on outbound
