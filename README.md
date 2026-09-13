@@ -266,7 +266,7 @@ TaskTracker, Spotlighting, an LLM judge).
 
 2.2× the baseline on attacks that already beat a shipped defense stack, at zero false positives.
 
-**Generalization, as a progression — this is the number we would most want a judge to ask about.**
+**Generalization, as a progression — this is the number we would most want a reader to scrutinise.**
 The plan pre-registered BIPIA as an independent second source, in its own words, "to show 1A isn't
 overfit to LLMail's style." We ran that test. It is overfit.
 
@@ -347,7 +347,7 @@ The held-out geometry measurements for the new cluster signal were:
 > **Provenance caveat:** unlike every other table in this README, the DEV sweep and the held-out rows
 > above have **no persisted results file**. They come from the tuning run's own report, and
 > `results/` holds no geometry JSON newer than `geometry_20260910T142941Z.json` (the baseline). Rerun
-> `python -m triad.stage1.eval_geometry` and cite its output before quoting these on a slide. No
+> `python -m triad.stage1.eval_geometry` and cite its output before quoting these numbers. No
 > combined `query_echo` + `batch_cluster` held-out figure was reported.
 
 The latest exact end-to-end run caught **456/500 poison chunks (91.2%)** and flagged **205/10,117
@@ -775,8 +775,8 @@ both "further reading" and the citation list.
 
 ### Claims we could NOT source
 
-- **"Poisoning 0.04% of a corpus yields 98.2% attack success."** This figure appears in the problem
-  statement itself and in several blog posts, and web search attributes it to Phantom
+- **"Poisoning 0.04% of a corpus yields 98.2% attack success."** This figure circulates widely in
+  blog posts and secondary write-ups, and web search attributes it to Phantom
   ([arXiv:2405.20485](https://arxiv.org/html/2405.20485v2)). **It is not in that paper.** Checked
   v2 directly: no 0.04%, no 98.2%, no 74.6% refusal figure; its refusal-to-answer results run
   6.7%–93.3% across trigger/model pairs. The number is currently traceable only to secondary
