@@ -1,10 +1,10 @@
-"""The demo API's backend contract.
+"""The HTTP API's backend contract.
 
-``DemoService`` is a Protocol: the UI and ``app.py`` code against it, not against
-any concrete implementation. ``FakeDemoService`` below returns realistic,
-clearly-labelled FAKE data so the UI can be built and tested before the real
-pipeline exists. A later ``RealDemoService`` (see ``real_adapter.py``) wraps the
-actual Stage 1/2/3 pipeline and must satisfy the exact same Protocol.
+``DemoService`` is a Protocol: ``app.py`` codes against it, not against any
+concrete implementation. ``FakeDemoService`` below returns realistic,
+clearly-labelled FAKE data so the API can be built and tested without a real
+corpus or LLM credentials. ``RealDemoService`` (see ``real_adapter.py``) wraps
+the actual Stage 1/2/3 pipeline and must satisfy the exact same Protocol.
 
 Chunk-level data leans on the frozen ``triad.contract`` types (``Chunk``,
 ``Provenance``, ``TaintVerdict``, ``ScoredChunk``) so a real adapter can hand back
@@ -57,7 +57,8 @@ class TraceEvent:
     entry, not a stage's authoritative allow/block verdict, and its stage
     vocabulary (``ingest|retrieve|prompt|egress``) intentionally differs from
     the contract's (``ingest|retrieve|generate|egress``) because "prompt" is
-    what a judge watching the UI understands; "generate" is the internal name.
+    what a caller inspecting the trace understands; "generate" is the
+    internal name.
     """
 
     chunk_id: str
@@ -171,9 +172,10 @@ class ResultRow:
 
 @dataclass(frozen=True)
 class ServiceMeta:
-    """Tells the UI, up front, whether ANYTHING it is about to render is real.
-    Every view (answers, quarantine, trace, probe) must be able to key off
-    this so a judge never mistakes fabricated demo output for a measurement.
+    """Tells a caller, up front, whether ANYTHING it is about to receive is
+    real. Every view (answers, quarantine, trace, probe) must be able to key
+    off this so a caller never mistakes fabricated demo output for a
+    measurement.
     """
 
     service: str  # "fake" | "real"
@@ -206,10 +208,12 @@ class DemoService(Protocol):
         ...
 
     def chunk_tenant(self, chunk_id: str) -> str | None:
-        """Return the chunk's tenant, or None if chunk_id is unknown. Used by
-        app.py to enforce an employee's trace-scoping *before* any trace
-        content (which may contain quoted email text) is ever assembled --
-        see the "Roles and access control" section of the README."""
+        """Return the chunk's tenant, or None if chunk_id is unknown. Exists
+        so a caller can scope trace access to a chunk's tenant *before* any
+        trace content (which may contain quoted email text) is ever
+        assembled -- this service itself enforces no such scoping; see
+        ``triad/api/app.py``'s module docstring for the integration
+        contract."""
         ...
 
     def results_table(self) -> list[ResultRow]: ...

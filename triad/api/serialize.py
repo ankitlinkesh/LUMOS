@@ -1,5 +1,5 @@
 """Convert ``triad.contract`` / ``triad.api.service`` dataclasses into the exact
-JSON shapes the UI expects. Kept separate from ``app.py`` so a real
+JSON shapes the HTTP API returns. Kept separate from ``app.py`` so a real
 ``DemoService`` implementation only has to produce the dataclasses in
 ``service.py`` (or hand back genuine contract objects) — never hand-roll JSON.
 """
@@ -24,7 +24,6 @@ __all__ = [
     "tenant_dict",
     "ask_dict",
     "quarantine_dict",
-    "quarantine_aggregate_dict",
     "probe_dict",
     "trace_step_dict",
     "results_row_dict",
@@ -92,23 +91,6 @@ def quarantine_dict(q: QuarantineItem) -> dict:
         "flags": list(q.flags),
         "reasons": list(q.reasons),
     }
-
-
-def quarantine_aggregate_dict(items: list[QuarantineItem]) -> dict:
-    """The CEO's view of the quarantine queue: counts only. No id, preview,
-    or reason string appears anywhere in this shape -- those fields quote
-    real email text (or a Stage-1 rationale that itself quotes the chunk),
-    which is exactly what a CEO must not read about a tenant's inbox (see
-    the README's "Roles and access control" section). ``by_tenant``/
-    ``by_flag`` are built straight off each item's own ``tenant``/``flags``,
-    never a second classification."""
-    by_tenant: dict[str, int] = {}
-    by_flag: dict[str, int] = {}
-    for q in items:
-        by_tenant[q.tenant] = by_tenant.get(q.tenant, 0) + 1
-        for f in q.flags:
-            by_flag[f] = by_flag.get(f, 0) + 1
-    return {"total": len(items), "by_tenant": by_tenant, "by_flag": by_flag}
 
 
 def _probe_side_dict(side) -> dict:

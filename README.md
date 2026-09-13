@@ -1,6 +1,6 @@
 # LUMOS RAG
 
-**A three-stage integrity and access-control pipeline for RAG systems** — hackathon PS 3.
+**A three-stage integrity and access-control pipeline for RAG systems.**
 
 Retrieval-augmented generation trusts whatever the retriever hands it. That trust is the
 vulnerability: a document can carry the attacker's answer (PoisonedRAG), instructions aimed at the
@@ -42,6 +42,189 @@ real corpora are not claimed yet. Two consequences to keep in mind when reading 
 Stage 1A figure below was measured before it existed**; and `context_guard` is enabled in the
 defended arm of the current ASR run, so that run's improvement is not attributable to ingestion
 alone. Neither has had a per-component ablation.
+
+## Install
+
+Requires Python 3.11+.
+
+```
+pip install -e .
+```
+
+The core install is deliberately light (`numpy`, `beautifulsoup4`, `nh3`, `markdown-it-py`,
+`tldextract`) — enough to run Stage 1 (ingestion scanning) and Stage 3 (egress / tool-call
+authorization) as a pure library, with no ML stack, no vector database, and no web framework
+pulled in. Everything else is an opt-in extra:
+
+| Extra | Installs | Unlocks |
+|---|---|---|
+| `embed` | `sentence-transformers`, `torch` | real embedding models (bge-small, Contriever, ...) |
+| `store` | `chromadb` | a real tenant-scoped vector store |
+| `llm` | `httpx` | real LLM calls (`triad.llm.client.GroqClient`, Groq's OpenAI-compatible API) |
+| `data` | `pyarrow`, `huggingface_hub`, `requests` | the real dataset loaders and `scripts/download_data.py` |
+| `service` | `fastapi`, `uvicorn`, `pydantic` | the optional HTTP service (`triad.api`) |
+| `dev` | all of the above, plus `pytest`, `hypothesis` | the full test suite |
+| `all` | all of the above (except `pytest`/`hypothesis`) | everything, for local use |
+
+```
+pip install -e ".[dev]"     # everything, for development
+pip install -e ".[service]" # just the library + the HTTP service
+```
+
+Importing `triad` without an extra installed degrades cleanly: a module that needs, say,
+`chromadb` only raises when you actually try to use the real vector store, not on import of the
+package or of unrelated modules.
+
+## Quickstart
+
+### As a library
+
+```python
+from pathlib import Path
+
+import chromadb
+
+from triad.contract import Chunk, Provenance
+from triad.embed.hash_embedder import HashEmbedder      # fast, no download; swap for
+                                                          # SentenceTransformerEmbedder with the `embed` extra
+from triad.pipeline import Pipeline
+from triad.quarantine import QuarantineQueue
+from triad.retrieval.scope import Scope
+from triad.retrieval.store import TenantStore
+from triad.stage1 import directive
+from triad.stage3.actions import authorize_tool_call
+
+# --- Stage 1: scan a document at ingestion -------------------------------
+chunk = Chunk(
+    id="doc-1", text="Q3 budget memo...", tenant="acme",
+    source_type="email", provenance=Provenance("mycorp-mailbox", "doc-1", "real"),
+)
+decision = directive.scan(chunk)
+if not decision.allow:
+    print("would be quarantined:", decision.reasons)
+
+# --- Stage 2: tenant-scoped retrieval, through the pipeline ---------------
+embedder = HashEmbedder(dim=128)
+store = TenantStore(client=chromadb.EphemeralClient(), space=embedder.space)
+quarantine = QuarantineQueue(path=Path("quarantine.json"), log_path=Path("quarantine.log.jsonl"))
+pipeline = Pipeline(store=store, embedder=embedder, llm=my_llm, quarantine=quarantine)
+
+pipeline.ingest([chunk])                                  # Stage 1 runs here; clean chunks are indexed
+answer = pipeline.ask("what's in the Q3 budget memo?", Scope.of("acme"), k=5)
+# `Scope.of("acme")` is the only thing that can ever be searched -- an empty
+# scope searches nothing, and SecureRetriever never falls back to widening it.
+
+# --- Stage 3: check an outbound action before it runs ---------------------
+tool_decision = authorize_tool_call(
+    "send_email",
+    {"to": "someone@example.com", "body": answer.text},
+    context=answer.retrieval.chunks,
+    user_request="summarize the budget memo",
+)
+if not tool_decision.allow:
+    print("escalated to a human:", tool_decision.reasons)
+```
+
+`my_llm` is anything implementing the small `chat(messages, *, principal, scope, ...)` protocol in
+`triad/pipeline.py` — `triad.llm.client.GroqClient` (needs the `llm` extra and a real API key in
+`secrets/groq_keys.txt`) or a fake for tests, same pattern the test suite uses throughout
+(`tests/test_pipeline_core.py`).
+
+### As an HTTP service
+
+```
+pip install -e ".[service,store,embed,llm,data]"   # or just ".[all]"
+
+python -m triad.api                  # fake demo service: no corpus, no LLM key, for local dev
+python -m triad.api --real --port 8000    # real pipeline: needs data/ and secrets/groq_keys.txt
+```
+
+```
+curl localhost:8000/api/meta
+curl localhost:8000/api/tenants
+curl -X POST localhost:8000/api/ask \
+    -H "Content-Type: application/json" \
+    -d '{"tenant":"acme","question":"what is the Q3 budget?","defense":true}'
+```
+
+**Read this before putting the service behind anything but a trusted, direct caller.** There is no
+login layer. `POST /api/ask` takes `tenant` straight from the request body, and `defense` (which
+selects between the secure and the deliberately vulnerable "leaky" retriever — see Stage 2 below)
+straight from the body too. This project's entire premise is that a retrieved chunk must never
+widen its own retrieval scope; on the HTTP surface, that invariant only holds if **your integration
+binds the tenant to its own authenticated session and refuses to forward a caller-supplied tenant or
+`defense: false`.** Exposing these endpoints directly to end users, with tenant or `defense`
+attacker-controlled, reintroduces exactly the cross-tenant leak Stage 2 exists to prevent — the
+service will faithfully run the leaky retriever if asked to, because proving that leak is real is
+one of this project's own measurements (see Stage 2, below). Treat this as the integration
+contract, not an oversight: see the module docstring in `triad/api/app.py` for the same statement
+in code.
+
+`triad/api/service.py` defines `DemoService` as a `Protocol` with two implementations:
+`FakeDemoService` (canned, clearly-labelled fake data, no dependencies beyond the core install) and
+`RealDemoService` (`triad/api/real_adapter.py`, wraps a real `Pipeline`). Both satisfy the exact
+same interface, so `python -m triad.api` and `python -m triad.api --real` serve identical routes —
+useful for developing against the API shape without a corpus or an LLM key, and `GET /api/meta`
+tells a caller which one it's talking to (`{"service": "fake", "data_source": "synthetic", ...}` vs.
+`{"service": "real", "data_source": "real", ...}`).
+
+`GET /api/results` never globs `results/`: it reads a fixed, explicit allowlist of filenames in
+`real_adapter.py`'s `_VALID_RESULT_FILES` and reports why each vetted file does or doesn't produce a
+row (two of the four vetted files have no added-latency measurement, so they contribute no row
+rather than a fabricated one). A results file that was never individually vetted for this table —
+including several files still on disk from superseded runs — is invisible to this endpoint by
+construction, not by being excluded one at a time.
+
+## Tests
+
+```
+pip install -e ".[dev]"
+python -m pytest                       # 368 tests; network and slow excluded by default
+python -m pytest -m slow               # also loads real datasets and models
+```
+
+## Dataset setup
+
+Real published datasets only (see "Data" below for what's real vs. mixed-in-by-opt-in). Once,
+~5 GB:
+
+```
+python scripts/download_data.py
+python scripts/inspect_data.py         # non-zero exit if anything is missing
+```
+
+Data lives in `data/raw` (5.10 GB, sha256 in `MANIFEST.json`) — put it on a drive with room; the
+default is wherever `triad/config.py`'s `ROOT` resolves to, which this project's own development
+kept off a nearly-full `C:` by pointing `HF_HOME` and the data directory at `D:`.
+
+## Reproducing the evaluations
+
+Each writes a timestamped JSON to `results/` carrying git hash, seed, embedder, and data
+composition — see `results/COMMIT_MAP.md` if a recorded git hash doesn't match anything in this
+repo's history (commit authorship was reassigned once; trees and messages are unchanged, hashes
+aren't).
+
+```
+python -m triad.eval.tenant_leak     --n-tenants 20 --n-probes 500 --k 5
+python -m triad.eval.injection       --n-enron 500 --probe-baseline   # --probe-baseline makes live Groq calls
+python -m triad.eval.bipia           --seed 7 --n-enron 300           # held-out generalization; no LLM, ~1 min
+python -m triad.stage1.eval_geometry --n-clean 5000 --embedder bge
+python -m triad.eval.poisonedrag     --n 100 --sample-n 10000         # the ASR run
+python -m triad.eval.ablation        --n 10                           # one row per stage on/off
+python -m triad.eval.report                                           # collate results/ into a table
+```
+
+For reported real-data runs, keep model loading offline and require real data explicitly:
+
+```
+$env:HF_HUB_OFFLINE="1"
+$env:TRANSFORMERS_OFFLINE="1"
+$env:TRIAD_REQUIRE_REAL="1"
+python -m triad.eval.poisonedrag --n 100 --sample-n 10000
+```
+
+Do not run the ASR evaluator concurrently with another evaluator or the live API: they share the
+Groq key pool and are intentionally expensive.
 
 ## Measured results
 
@@ -474,318 +657,6 @@ non-zero** if a file or label is missing.
 *Licenses:* PoisonedRAG ships no license file and BIPIA is NOASSERTION — fine for evaluation, do
 not redistribute their files.
 
-## Quickstart
-
-```
-# Python 3.11+; CPU-only torch keeps the install small
-python -m venv .venv
-.venv\Scripts\activate                 # Windows; use .venv/bin/activate elsewhere
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
-
-python -m pytest                       # 406 tests; network and slow excluded by default
-python -m pytest -m slow               # also loads real datasets and models
-```
-
-Data (once, ~5 GB):
-
-```
-python scripts/download_data.py
-python scripts/inspect_data.py         # non-zero exit if anything is missing
-```
-
-## Running the evaluations
-
-Each writes a timestamped JSON to `results/` carrying git hash, seed, embedder, and data
-composition.
-
-```
-python -m triad.eval.tenant_leak     --n-tenants 20 --n-probes 500 --k 5
-python -m triad.eval.injection       --n-enron 500 --probe-baseline   # --probe-baseline makes live Groq calls
-python -m triad.eval.bipia           --seed 7 --n-enron 300           # held-out generalization; no LLM, ~1 min
-python -m triad.stage1.eval_geometry --n-clean 5000 --embedder bge
-python -m triad.eval.poisonedrag     --n 100 --sample-n 10000         # the ASR run
-python -m triad.eval.ablation        --n 10                           # one row per stage on/off
-python -m triad.eval.report                                           # collate results/ into a table
-```
-
-For reported real-data runs, keep model loading offline and require real data explicitly:
-
-```
-$env:HF_HUB_OFFLINE="1"
-$env:TRANSFORMERS_OFFLINE="1"
-$env:TRIAD_REQUIRE_REAL="1"
-python -m triad.eval.poisonedrag --n 100 --sample-n 10000
-```
-
-Do not run the ASR evaluator concurrently with another evaluator or the live API: they share the
-Groq key pool and are intentionally expensive.
-
-## Demo UI
-
-```
-python -m triad.api --port 8811            # fake demo service, for UI development
-python -m triad.api --real --port 8812     # real Groq calls, live Enron/LLMail-Inject corpus
-```
-
-Both commands above were run exactly as written and driven with `curl` against every `/api/*`
-route (not just checked via the test suite — a green suite here has previously proven storage
-without proving arrival). Every route except `/api/meta` and `/api/login` now requires a session
-first — see "Roles and access control" below for the full login-then-curl walkthrough and the
-demo credentials.
-
-The UI is a React + Vite build served offline as static files by the same FastAPI app — **no second
-code path**. The banner is driven by `ui/src/App.tsx`: `showDemoBanner = meta?.service !== "real"`,
-fail-safe in the "still shown" direction — it stays on until `GET /api/meta` *positively* returns
-`"real"`, so a slow/failed fetch never accidentally shows real data unbannered. `--real` now
-constructs the actual Groq client and the real `Pipeline.demo()` corpus *before* the server starts
-serving; if that build fails for any reason (no/invalid keys, etc.) the process prints the cause and
-exits — it never starts with the banner off and endpoints 500ing. Confirmed both directions:
-
-```
-$ python -m triad.api            # then: curl /api/meta
-{"service":"fake","data_source":"synthetic", ...}
-
-$ python -m triad.api --real     # then: curl /api/meta
-{"service":"real","data_source":"real","note":"Live pipeline output."}
-
-$ GROQ_API_KEYS=not_a_valid_key python -m triad.api --real
-error: --real could not build a working pipeline, so refusing to start ...
-  cause: ValueError: malformed key at GROQ_API_KEYS line 1: does not start with 'gsk_'
-(exit code 1 — no server, nothing to accidentally show unbannered)
-```
-
-`triad/api/real_adapter.py` is fully wired to the real `Pipeline` (all seven `DemoService`
-methods). Driven live end to end on the real EnronQA
-corpus (6 tenants, real Stage 1 quarantine, real Groq generation):
-
-- `/api/ask` — real `SecureRetriever`/`LeakyRetriever` retrieval + a real Groq chat completion.
-  Disk cache confirmed working (`"cached": true` on a repeated identical call).
-- `/api/tenants`, `/api/quarantine`, `/api/probe`, `/api/trace/{id}` — all backed by the live
-  `TenantStore`/`QuarantineQueue`, not synthetic data. `probe`'s `property_test` is a genuine
-  30-retrieval regression check against the live store on every call (`fake: false`), not a
-  hardcoded pass count.
-- **Bug found and fixed while driving this live:** real EnronQA chunk/quarantine ids look like
-  `allen-p/all_documents/423.` — they contain `/`. FastAPI's default path parameter can't match a
-  `/` inside one segment, so `GET /api/trace/{id}` and `POST /api/quarantine/{id}/release` 404'd
-  for every real id even though the adapter itself was correctly wired; the demo service's
-  slash-free canned ids never exposed this. Fixed in `triad/api/app.py` with the `:path` converter
-  (`{chunk_id:path}`, `{item_id:path}`); the frontend already sent `encodeURIComponent(id)`, so no
-  UI change was needed. Regression-tested in `tests/test_api_endpoints_real.py`.
-- **Known gap, not hidden:** on this real corpus, a defended (`defense: true`) `/api/ask` call
-  sometimes shows a `retrieve`/`blocked` trace line reading `internal error while collapsing
-  near-duplicate clusters: TypeError: can only concatenate str (not "list") to str`. That is a real
-  exception inside `triad/stage1/geometry.py`'s `collapse_topk` on real Enron text, caught by its
-  own fail-closed `except Exception` (so the request still returns 200 with a genuine, uncorrupted
-  answer — nothing is fabricated or hidden), surfaced honestly in the trace rather than swallowed.
-  Not fixed here: it is Stage 1B's own code, outside `real_adapter.py`'s scope.
-
-**Three defects found and fixed by driving `--real` live (not caught by the test suite):**
-
-1. **`/api/probe` used to ask a fixed, generic query regardless of `target_tenant`.** `target_tenant`
-   only gated whether the property test ran — the actual retrieval query never depended on it, so a
-   "leak" just meant "the requester's own mail doesn't match a generic string well," not "isolation
-   failed on a query aimed at the target's content." Measured before the fix: only the smallest demo
-   inbox (`bass-e`, 16 docs) ever leaked, on every pair — the requester's own document scarcity, not
-   tenant isolation, was driving the number. Fixed by reusing `triad.eval.tenant_leak`'s own
-   probe-construction predicate (not a second methodology): a real EnronQA test-split question whose
-   gold email belongs to `target_tenant` AND is actually indexed in the live store (`RealDemoService.
-   _target_probe_query`, injectable via a `qa_loader` constructor arg for tests). If no such
-   question/chunk pair exists, `probe()` raises `NoUsableTargetDocument` — `POST /api/probe` maps
-   that to `422` with the reason — rather than silently falling back to the old generic query, which
-   would reintroduce the exact bug. `ProbeResult` gained `query` (the question actually run) and
-   `target_gold_chunk_id`/`gold_leaked` (whether that *specific* chunk — not just any foreign one —
-   came back on the leaky side, the same `leak_gold` definition `tenant_leak.py` measures). Confirmed
-   live over all 30 ordered pairs among the 6 demo tenants: **secure side leaked on 0/30** (the
-   invariant, unchanged); **leaky side leaked on 8/30, spread across normal-sized inboxes** —
-   `allen-p↔arnold-j`, `arnold-j→badeer-r`, `badeer-r→arnold-j`/`bailey-s`/`bass-e`,
-   `bass-e→arora-h`/`badeer-r` — every leaking pair had `gold_leaked: true` (the exact targeted chunk,
-   not incidental noise), and `bass-e` is no longer the only tenant that ever leaks.
-2. **The live trace said Stage 3 was "paused" after Stage 3 had already been measured** (see the
-   section above) — the demo built its pipeline with `DefenseConfig()` defaults, under which
-   `stage3_enabled=False`, and the trace strings said "paused in this build," reading as
-   unimplemented. Decided on evidence, not a guess: built the demo corpus twice (`stage3_enabled`
-   off vs on) and ran the same 10 real questions (real Groq calls) through both. Egress ran on 10/10
-   and `inspect_answer` blocked or rewrote 0/10 — the 43.6% URL false-positive rate measured above
-   didn't bite because none of the 10 sampled answers happened to contain a URL. Two answers differed
-   in wording, traced to `wrap_untrusted`'s prompt fence changing the model's own phrasing, not to
-   `inspect_answer` touching anything — counted separately so a fence-driven wording change is never
-   misattributed to the egress guard. Enabled Stage 3 for the demo server only
-   (`triad/api/__main__.py` now passes `DefenseConfig(stage3_enabled=True)` to `Pipeline.demo()`);
-   `DefenseConfig.stage3_enabled`'s own default stays `False` (the eval harnesses and every persisted
-   `results/` number depend on that default, unchanged). Also fixed a mirror-image overclaim: `GET
-   /api/trace/{id}` isn't tied to any specific `/api/ask` call, so "Stage 3 egress checks ran" was
-   itself a false claim about an event that never happened for that view — both trace endpoints now
-   state a configuration fact instead (`"enabled"`/`"disabled" by configuration in this build`), and
-   `FakeDemoService`'s three hardcoded "paused" strings were brought into the same non-contradictory
-   wording so the fake and real services never disagree about what a judge is looking at.
-3. **`data_source: "mixed"` on `/api/ask` was correct but unexplained next to `meta`'s `"real"`.**
-   The demo corpus mixes real EnronQA/LLMail-Inject records with a synthetic PoisonedRAG-style
-   poison set (see `Pipeline.demo`'s docstring) — `"mixed"` is the conservative, corpus-level truth
-   (a synthetic chunk *could* have been retrieved) and stays exactly as it was. Added the per-response
-   fact alongside it: `AskResult.n_chunks_real`/`n_chunks_synthetic`, computed from the actually-
-   retrieved chunks' own `Provenance.data_source` (never a second guess — `n_real + n_synthetic ==
-   len(chunks)` always, and both are `0` for a declined/empty retrieval, which is not the same claim
-   as "0% synthetic"). Surfaced in the UI next to the existing `data:` badge. Live: ordinary `/api/ask`
-   calls on this demo corpus returned `"n_chunks_real":5,"n_chunks_synthetic":0` — the small planted
-   poison set is small enough, and largely caught by Stage 1 quarantine, that a synthetic chunk
-   surviving into an ordinary answer is the exception rather than the rule; the composition math
-   itself is covered by a dedicated unit test that mixes a real- and synthetic-provenance chunk in
-   one store and asserts the exact 1/1 split.
-
-`/api/results` reads **only** from an explicit filename allowlist in `real_adapter.py`
-(`_VALID_RESULT_FILES`), never a directory glob. Of the files in `results/`, four are the vetted
-headline runs; two of those four produce a `ResultRow` (PoisonedRAG n=100, cross-tenant leak n=500);
-the other two (`geometry_...json`, `injection_...json`) are real and vetted but contain no
-added-latency measurement, so they deliberately produce no row rather than a fabricated one — see
-the comment above `_VALID_RESULT_FILES` for the full reasoning. Everything else in `results/`
-(the four known-invalid smoke/retry runs, plus any file never individually vetted for this table)
-is invisible to `/api/results` by construction, not by being individually excluded. Confirmed live:
-`GET /api/results` on the real server returns exactly those 2 rows, both `"fake": false`.
-
-## Roles and access control
-
-The demo API requires a login, and **every permission is enforced on the server** — the UI hides
-sections a role can't use, but that's cosmetic; a judge probing with `curl` gets the exact same
-403/401 the UI would have silently avoided. All of it lives in one module, `triad/api/auth.py`:
-one `POLICY` table maps every `(method, path)` to the roles allowed to call it, one `AuthService`
-class owns password checks, sessions, and the login throttle, and `triad/api/app.py`'s
-`_PolicyRoute` consults `POLICY` on every request before FastAPI even parses the body — so an
-unauthenticated POST gets 401 even if its JSON is garbage. This is identical for the fake and
-`--real` services: login, sessions, and `POLICY` sit above `DemoService`, which neither
-implementation's auth path ever sees.
-
-There are four roles: **employee** (one account per tenant), **dbmanager**, **securityhead**, and
-**ceo** (one shared account each).
-
-| Capability | employee | dbmanager | securityhead | ceo |
-|---|---|---|---|---|
-| `POST /api/ask` | own tenant only, **defense forced ON** | 403 | 403 | 403 |
-| `GET /api/tenants` | 403 | ✅ | ✅ | ✅ |
-| `GET /api/quarantine` | 403 | ✅ read-only | ✅ | **aggregate counts only** (per tenant + per flag, no ids/previews/reasons) |
-| `POST /api/quarantine/{id}/release` | 403 | **403** | ✅ | 403 |
-| `GET /api/trace/{id}` | **only chunks whose tenant == own tenant** | ✅ | ✅ | 403 |
-| `POST /api/probe` (the leaky baseline) | 403 | 403 | ✅ | 403 |
-| `GET /api/results` | 403 | 403 | ✅ | ✅ |
-| `GET /api/meta`, `/api/login`, static UI files | public | | | |
-
-Two things worth calling out about *why* the table is shaped this way, not just what it says:
-
-- **An employee cannot reach the leaky baseline.** `POST /api/ask` forces `defense=true` server-side
-  regardless of what the request body asks for — the OFF path is the deliberately vulnerable
-  retriever from the Cross-tenant probe panel, and it genuinely does return other tenants' mail. The
-  only account that can ever fire it is securityhead, through `POST /api/probe`, which runs both
-  sides side by side for exactly this reason (so the vulnerable path stays observable without being
-  generally reachable).
-- **Tenant scope comes from the session, never the request.** `post_ask` in `app.py` ignores
-  `AskRequest.tenant` whenever it disagrees with the session's own `tenant` and returns 403 instead
-  of silently substituting the correct value — a tampering attempt is visible, not quietly absorbed.
-  The same rule is why the **ceo** role, despite sitting above securityhead in the org chart, cannot
-  read a single employee's inbox: its quarantine view is `total`/`by_tenant`/`by_flag` counts,
-  computed server-side from the same `QuarantineItem` list every other role sees, with every id,
-  preview, and reason string (which quote real email text) stripped before serialization — never
-  redacted client-side, never present in the response to redact.
-- **Release requires securityhead, not dbmanager.** A dbmanager can see everything quarantined
-  (read-only) but cannot release anything — releasing back into a retrievable index is the
-  security-relevant action, so it needs a separate role from the one that merely administers the
-  store, i.e. separation of duties.
-
-**Sessions.** `POST /api/login` checks the password with PBKDF2-HMAC-SHA256
-(`hashlib.pbkdf2_hmac`, 200,000 iterations, a random 16-byte salt per user) compared with
-`hmac.compare_digest`, and returns the identical generic 401 for a wrong username, a wrong
-password, or an active lockout — a client can't distinguish any of the three from the response
-alone. On success it creates a random `secrets.token_urlsafe(32)` session token, held **in
-process memory** (a server restart logs everyone out — acceptable for a hackathon demo, called out
-here rather than left implicit) with an 8-hour expiry, and sets it as an `HttpOnly`,
-`SameSite=Strict` cookie — no `Secure` flag, because this demo is served over plain HTTP on
-localhost and `Secure` would make the browser silently drop the cookie; flip it on for a TLS
-deployment. Five failed logins for the same username lock that username out for 60 seconds
-(throttled by the username string itself, regardless of whether it exists, so lockout behavior
-can't be used to enumerate valid usernames). `POST /api/logout` deletes the session outright.
-`GET /api/me` returns `{username, role, tenant, permissions}`, where `permissions` is read straight
-out of the same `POLICY` table that enforces access, so it can never drift from what the server
-actually allows.
-
-A route with no `POLICY` entry **default-denies** (401 unauthenticated, 403 authenticated) rather
-than default-allowing, and `tests/test_auth.py::test_every_api_route_has_a_policy_entry` enumerates
-every route FastAPI actually registered and fails the build if one has no entry — mutation-tested by
-temporarily adding an unpoliced route directly to `app.py`'s `create_app`, confirming the test
-failed with exactly that route named in the assertion, then reverting.
-
-**Demo credentials — for the hackathon demo only.** These are not secrets in the `secrets/` sense
-(nothing production-critical depends on them); they exist so a judge can log in. Regenerate the
-committed hashes any time with `python scripts/gen_demo_users.py` (stdlib only, no new
-dependency) — it hashes the same passwords below with a fresh random salt and rewrites
-`triad/api/demo_users.json`, which holds only PBKDF2 hashes, never plaintext.
-
-| Username | Role | Tenant | Password |
-|---|---|---|---|
-| `allen-p` | employee | allen-p | `AllenDemo!2026` |
-| `arnold-j` | employee | arnold-j | `ArnoldDemo!2026` |
-| `arora-h` | employee | arora-h | `AroraDemo!2026` |
-| `badeer-r` | employee | badeer-r | `BadeerDemo!2026` |
-| `bailey-s` | employee | bailey-s | `BaileyDemo!2026` |
-| `bass-e` | employee | bass-e | `BassDemo!2026` |
-| `dbmanager` | dbmanager | — | `DbManagerDemo!2026` |
-| `securityhead` | securityhead | — | `SecurityHeadDemo!2026` |
-| `ceo` | ceo | — | `CeoDemo!2026` |
-
-The six employee usernames are EnronQA's own real tenant ids — the same ones `Pipeline.demo()`
-ingests under `--real` — so these accounts work unmodified against both services; confirmed live,
-`GET /api/tenants` as dbmanager on the real server returns exactly
-`allen-p, arnold-j, arora-h, badeer-r, bailey-s, bass-e`.
-
-A login-then-curl walkthrough (cookies persisted in a jar across calls):
-
-```
-$ curl -c jar.txt -X POST localhost:8812/api/login \
-    -H "Content-Type: application/json" \
-    -d '{"username":"securityhead","password":"SecurityHeadDemo!2026"}'
-{"username":"securityhead","role":"securityhead","tenant":null}
-
-$ curl -b jar.txt localhost:8812/api/me
-{"username":"securityhead","role":"securityhead","tenant":null,"permissions":[...]}
-
-$ curl -b jar.txt localhost:8812/api/tenants
-[{"id":"allen-p",...}, ...]
-
-$ curl -b jar.txt -X POST localhost:8812/api/probe \
-    -H "Content-Type: application/json" \
-    -d '{"as_tenant":"allen-p","target_tenant":"arnold-j"}'
-{"secure": {...}, "leaky": {...}, ...}
-```
-
-**Confirmed live against the running `--real` server** (all status codes below are the actual
-response, not the expected one — see the four session cookie jars used):
-
-```
-$ curl -o /dev/null -w '%{http_code}' localhost:8812/api/meta        -> 200 (public)
-$ curl -o /dev/null -w '%{http_code}' localhost:8812/api/tenants     -> 401 (no session)
-$ curl -o /dev/null -w '%{http_code}' localhost:8812/api/me          -> 401 (no session)
-
-# as employee allen-p (tenant allen-p)
-POST /api/ask   {tenant: allen-p}                     -> 200
-POST /api/ask   {tenant: allen-p, defense: false}      -> 200, "leak_mode": false  (still defended)
-POST /api/ask   {tenant: arnold-j}  <- tampered tenant  -> 403
-GET  /api/tenants                                       -> 403
-GET  /api/trace/<own allen-p chunk>                      -> 200
-GET  /api/trace/<a bailey-s chunk>  <- foreign tenant    -> 403 {"detail":"forbidden"} (no reason text)
-GET  /api/trace/does-not-exist-xyz  <- unknown, same code -> 403 (can't distinguish "foreign" from "unknown")
-POST /api/logout -> 200; GET /api/me afterward           -> 401
-
-# as dbmanager / securityhead / ceo
-GET  /api/tenants                    -> dbmanager 200, securityhead 200, ceo 200
-GET  /api/quarantine                 -> dbmanager 200 (full), securityhead 200 (full), ceo 200 (aggregate-only)
-POST /api/quarantine/{id}/release    -> dbmanager 403, securityhead 200
-POST /api/probe                      -> dbmanager 403, securityhead 200, ceo 403
-GET  /api/results                    -> dbmanager 403, securityhead 200, ceo 200
-```
-
-The `ceo` quarantine body on the same live server:
-`{"total":38,"by_tenant":{"bailey-s":10,"badeer-r":4,...},"by_flag":{"action_verb_near_address":8,"batch_cluster":17,...}}`
-— no `id`, `preview`, or `reasons` key anywhere in it, confirmed by grepping the raw response body
-for every id/preview/reason string the securityhead's full view of the same queue returns.
-
 ## Layout
 
 ```
@@ -799,13 +670,12 @@ triad/
   stage1/            1A hygiene + hidden_text + directive; 1B geometry (query_echo, batch_cluster); eval drivers
   stage3/            egress, tool-call authorization, fencing  (measured; see Stage 3 above)
   eval/              the measurement harness, one module per experiment
-  api/               FastAPI app, fake demo service, real adapter
+  api/               FastAPI app + DemoService protocol (fake service, real adapter)
   pipeline.py        end-to-end wiring
   context_guard.py   post-retrieval firewall: tenant/quarantine block, secret/SSN/phone redaction
   quarantine.py      reviewable queue with a reason string and a release path — never deletion
-tests/               370 tests, incl. Hypothesis property tests for the Stage 2 invariant
+tests/               368 tests, incl. Hypothesis property tests for the Stage 2 invariant
 scripts/             dataset download + verification
-ui/                  React + Vite demo front end
 results/             timestamped measurement JSONs
 ```
 
@@ -823,6 +693,9 @@ results/             timestamped measurement JSONs
   so keys 2–6 "passed" without ever reaching Groq.
 - **Quarantine, never delete.** "What happens to a false positive?" is the first question an
   enterprise reviewer asks.
+- **Real dataset ids can contain `/`.** EnronQA chunk ids look like `allen-p/all_documents/423.` —
+  FastAPI's default path parameter can't match a `/` inside one segment, so `triad/api/app.py` uses
+  the `:path` converter (`{chunk_id:path}`, `{item_id:path}`) on every route that takes one.
 
 ## Secrets
 
@@ -837,8 +710,12 @@ never touch the real file — they build temp files with fake keys.
 - Corpus scale is thousands of passages, not millions. The poison ratio is stated per run rather
   than implying million-document scale.
 - Threat model: the attacker can write documents or send email, and is black-box to the retriever
-  and the LLM. **The tenant identity comes from the authenticated session, never from the query.**
-  Out of scope: a compromised embedder, a malicious administrator.
+  and the LLM. **As a library, the tenant identity is whatever `Scope` you construct and pass in —
+  the retriever never widens it.** As the HTTP service, that invariant only holds end to end if your
+  integration binds the tenant to its own authenticated session before it ever reaches
+  `/api/ask`; the service itself has no session layer and trusts its caller (see "Quickstart" above
+  and `triad/api/app.py`'s module docstring). Out of scope either way: a compromised embedder, a
+  malicious administrator.
 - Ingest-time poison detection now holds against paraphrase (90.8% held-out via `batch_cluster`) but
   **not against an attacker who drops the question prefix (36.8%)**, and `batch_cluster` needs the
   poison to arrive in one ingestion batch: five documents uploaded separately defeat it.
@@ -857,6 +734,32 @@ never touch the real file — they build temp files with fake keys.
   **No defense-in-depth row is available here — both stages miss this class.** Covering it needs a
   new Stage 1A signal for bare imperatives, and that signal has to clear the bar the current one
   cannot: the benign noise floor of real business email.
+
+## Project status
+
+**Early — `0.1.0`.** This project measures real attacks against a real (if small-scale) RAG
+pipeline and reports what it finds, including the results that are bad. It has not been used in
+production, has not had an external security audit, and the section above lists what it does not
+yet cover. Expect breaking changes before `1.0`; `triad/contract.py` is the one thing that won't
+move without an explicit agreement first (see `CONTRIBUTING.md`).
+
+## Contributing
+
+See `CONTRIBUTING.md` for dev setup, how to run the tests, and the house rules that keep the
+numbers in this README trustworthy (real data only, tune-on-dev/report-on-held-out, every rate
+prints its denominator, no LLM in the detection path, `triad/contract.py` is frozen). Bug reports,
+new attack/eval coverage, and documentation fixes are all welcome.
+
+See `SECURITY.md` to report a vulnerability rather than filing it as a public issue.
+
+## License
+
+Apache License 2.0 — see `LICENSE`.
+
+## Citing this work
+
+If you build on this, please also cite the datasets and papers it builds on — the list below is
+both "further reading" and the citation list.
 
 ## Sources
 

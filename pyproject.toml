@@ -1,8 +1,76 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "triad-rag"
 version = "0.1.0"
-description = "Three-stage integrity and access control pipeline for RAG (PS 3)"
+description = "A three-stage integrity and access-control pipeline for RAG systems: ingest-time poisoning detection, tenant-scoped retrieval, and egress/tool-call authorization."
+readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
+authors = [
+    { name = "TRIAD-RAG contributors" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Core dependencies: enough to import triad's detection contract (Stage 1
+# structural/hygiene checks, Stage 3 egress/tool-call authorization,
+# quarantine, context firewall) and its dataclasses with no ML stack, no
+# vector store, and no HTTP framework pulled in. Real embeddings, a real
+# vector store, real LLM calls, dataset loaders, and the HTTP service are
+# all opt-in extras below -- importing triad without them still works,
+# individual features raise only when actually used without their extra.
+dependencies = [
+    "numpy",
+    "beautifulsoup4",
+    "nh3",
+    "markdown-it-py",
+    "tldextract",
+]
+
+[project.optional-dependencies]
+# Real sentence-embedding models (SentenceTransformerEmbedder: bge-small,
+# Contriever, ...). Without this extra, triad.embed still imports fine --
+# only constructing/using a real embedder needs it (HashEmbedder, used by
+# the test suite and for fast local dev, needs no extra at all).
+embed = ["sentence-transformers", "torch"]
+# A real tenant-scoped vector store (triad.retrieval.store.TenantStore).
+store = ["chromadb"]
+# Real LLM calls (triad.llm.client.GroqClient, Groq's OpenAI-compatible API).
+llm = ["httpx"]
+# Real dataset loaders (EnronQA/BEIR parquet, LLMail-Inject/BIPIA/PoisonedRAG
+# JSON) and scripts/download_data.py.
+data = ["pyarrow", "huggingface_hub", "requests"]
+# The optional HTTP service (triad.api): FastAPI app + uvicorn runner.
+service = ["fastapi", "uvicorn", "pydantic"]
+# Everything needed to run the full test suite, including the datasets/models
+# `-m slow` tests load.
+dev = [
+    "triad-rag[embed,store,llm,data,service]",
+    "pytest",
+    "hypothesis",
+]
+# Convenience meta-extra: every optional piece, for a full local install.
+all = ["triad-rag[embed,store,llm,data,service]"]
+
+[project.urls]
+Homepage = "https://github.com/ankitlinkesh/LUMOS"
+Repository = "https://github.com/ankitlinkesh/LUMOS"
+Issues = "https://github.com/ankitlinkesh/LUMOS/issues"
+
+[tool.setuptools.packages.find]
+include = ["triad*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

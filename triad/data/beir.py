@@ -9,8 +9,8 @@ same-process determinism test and silently fail across runs/machines).
 target's gold passages, resolved via `gold_ids_for_queries`) are added ON TOP,
 guaranteed present even if the random draw misses them -- so the returned corpus can
 be larger than `sample_n` by up to `len(include_ids)`. Document the ratio you used
-(sample_n vs. corpus size) wherever you report ASR on this slice; the PS's
-million-doc framing does not apply to a hackathon-scale corpus.
+(sample_n vs. corpus size) wherever you report ASR on this slice; PoisonedRAG's
+own million-doc framing does not apply to a corpus this small.
 """
 
 from __future__ import annotations

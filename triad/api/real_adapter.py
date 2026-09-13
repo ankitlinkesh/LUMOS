@@ -108,7 +108,13 @@ _CONTRACT_STAGE_TO_API_STAGE = {"ingest": "ingest", "retrieve": "retrieve", "gen
 # triad.eval.report``, which this module deliberately does not duplicate).
 # ---------------------------------------------------------------------------
 _VALID_RESULT_FILES: dict[str, str] = {
-    "poisonedrag_n100_20260910T195905Z.json":
+    # Supersedes poisonedrag_n100_20260910T195905Z.json (kept on disk, no
+    # longer surfaced by the UI): 195905Z was the corrected pre-retune run,
+    # ASR 62%->47%; this run (224217Z) is the current headline retuned run,
+    # ASR 62%->12%. See README's "Attack success rate -- historical baseline
+    # and current rerun" section for the full lineage of all six
+    # poisonedrag_n100_* files.
+    "poisonedrag_n100_20260910T224217Z.json":
         "headline PoisonedRAG black-box run (n=100 targets) -> one ResultRow. "
         "Supersedes poisonedrag_n100_20260910T153530Z.json, which measured "
         "cluster collapse while it was silently inert (triad/pipeline.py passed "
@@ -487,7 +493,7 @@ class RealDemoService:
     def results_table(self) -> list[ResultRow]:
         rows: list[ResultRow] = []
 
-        poisonedrag = self._read_allowlisted("poisonedrag_n100_20260910T195905Z.json")
+        poisonedrag = self._read_allowlisted("poisonedrag_n100_20260910T224217Z.json")
         if poisonedrag is not None:
             rows.append(_row_from_poisonedrag(poisonedrag))
 
