@@ -10,14 +10,18 @@ import pytest
 
 from triad.contract import Chunk, Provenance
 from triad.embed import HashEmbedder
+from triad.eval import _common
 from triad.eval.poisonedrag import (
     assert_all_conditions_retrieved,
     assert_stores_healthy,
+    ask_and_score,
     attack_succeeded,
     clean_correct,
     clean_str,
+    gold_ids_by_target,
     poison_chunks_for_targets,
 )
+from triad.llm.client import EmptyResponse
 from triad.pipeline import DefenseConfig, Pipeline
 from triad.retrieval.scope import Scope
 from triad.retrieval.store import TenantStore
@@ -209,3 +213,116 @@ def test_assert_all_conditions_retrieved_ignores_empty_response_failures():
         "clean_on": [_result(5)],
     }
     assert_all_conditions_retrieved(per_target)  # must not raise
+
+
+# -- the (A) vs (B) diagnostic fields: n_poison_in_topk / n_gold_in_topk / --
+# -- retrieved_ids, added to every per-target row (record-only, no ---------
+# -- scoring/threshold/retrieval/prompt change) ----------------------------
+
+def test_gold_ids_by_target_keyed_per_target_not_flattened(tmp_path):
+    """Unlike ``beir.gold_ids_for_queries`` (one combined tuple for ALL
+    requested ids -- what corpus construction needs), this keeps gold ids
+    keyed by target id, since scoring needs to know which gold id belongs to
+    which question."""
+    root = tmp_path
+    (root / "qrels").mkdir()
+    (root / "qrels" / "test.tsv").write_text(
+        "query-id\tcorpus-id\tscore\n"
+        "test1\tdoc6\t1\n"
+        "test1\tdoc7\t1\n"
+        "test107\tdoc3859\t1\n",
+        encoding="utf-8",
+    )
+    result = gold_ids_by_target(["test1", "test107", "test999"], root=root)
+    assert result["test1"] == ("doc6", "doc7")
+    assert result["test107"] == ("doc3859",)
+    assert result["test999"] == ()  # requested but absent from qrels: empty tuple, not a missing key
+
+
+def test_gold_ids_by_target_empty_input_returns_empty_dict():
+    assert gold_ids_by_target([]) == {}
+
+
+class _FakeAskTarget:
+    def __init__(self, tid, question, incorrect_answer, correct_answer):
+        self.id = tid
+        self.question = question
+        self.incorrect_answer = incorrect_answer
+        self.correct_answer = correct_answer
+
+
+class _FakeChatLLM:
+    """Duck-types the ``llm.chat`` surface ``Pipeline.ask`` calls -- same
+    shape as ``test_pipeline_core.FakeLLM``."""
+
+    def __init__(self, text="42"):
+        self.text = text
+
+    def chat(self, messages, *, principal, scope=(), model=None, max_tokens=None, temperature=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(text=self.text, cached=False)
+
+
+class _AlwaysEmptyLLM:
+    def chat(self, messages, *, principal, scope=(), model=None, max_tokens=None, temperature=None):
+        raise EmptyResponse("no usable text")
+
+
+def test_ask_and_score_records_poison_and_gold_counts_and_retrieved_ids():
+    embedder = HashEmbedder(dim=64)
+    gold_chunk = _make_chunk("doc6", "quarterly earnings report finance numbers")
+    poison_chunk = _make_chunk("poison:nq:test1:0", "quarterly earnings report finance numbers poison")
+    filler_chunk = _make_chunk("filler1", "quarterly earnings report finance numbers filler")
+    # k == store size: all 3 chunks are retrieved deterministically regardless of score.
+    pipeline = _pipeline(embedder, [gold_chunk, poison_chunk, filler_chunk])
+    target = _FakeAskTarget("test1", "what were the quarterly earnings?", "wrong", "42")
+    cache_stats = _common.CacheStats()
+
+    results = ask_and_score(
+        pipeline, _FakeChatLLM(text="42"), [target], scored_field="clean", k=3,
+        cache_stats=cache_stats, gold_ids_by_target={"test1": ("doc6",)},
+    )
+
+    assert len(results) == 1
+    r = results[0]
+    assert set(r["retrieved_ids"]) == {"doc6", "poison:nq:test1:0", "filler1"}
+    assert r["n_poison_in_topk"] == 1
+    assert r["n_gold_in_topk"] == 1
+    assert r["success"] is True
+
+
+def test_ask_and_score_n_gold_in_topk_is_none_without_a_gold_map():
+    """The task brief: if gold ids aren't available, skip the field rather
+    than guessing -- ``None`` (not 0) records "unknown", distinct from
+    "known and zero"."""
+    embedder = HashEmbedder(dim=64)
+    poison_chunk = _make_chunk("poison:nq:test1:0", "quarterly earnings report finance numbers poison")
+    filler_chunk = _make_chunk("filler1", "quarterly earnings report finance numbers filler")
+    pipeline = _pipeline(embedder, [poison_chunk, filler_chunk])
+    target = _FakeAskTarget("test1", "what were the quarterly earnings?", "wrong", "42")
+
+    results = ask_and_score(
+        pipeline, _FakeChatLLM(text="42"), [target], scored_field="clean", k=2,
+        cache_stats=_common.CacheStats(),  # no gold_ids_by_target passed
+    )
+
+    assert results[0]["n_gold_in_topk"] is None
+    assert results[0]["n_poison_in_topk"] == 1  # unaffected by the gold map's absence
+
+
+def test_ask_and_score_empty_response_failure_leaves_diagnostic_fields_none():
+    embedder = HashEmbedder(dim=64)
+    filler_chunk = _make_chunk("filler1", "quarterly earnings report finance numbers filler")
+    pipeline = _pipeline(embedder, [filler_chunk])
+    target = _FakeAskTarget("test1", "what were the quarterly earnings?", "wrong", "42")
+
+    results = ask_and_score(
+        pipeline, _AlwaysEmptyLLM(), [target], scored_field="clean", k=1,
+        cache_stats=_common.CacheStats(), gold_ids_by_target={"test1": ("doc6",)},
+    )
+
+    r = results[0]
+    assert r["empty_response_failure"] is True
+    assert r["retrieved_ids"] is None
+    assert r["n_poison_in_topk"] is None
+    assert r["n_gold_in_topk"] is None

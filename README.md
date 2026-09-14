@@ -555,6 +555,45 @@ The run had **6 empty Groq completions after retries** (2 in each defended/undef
 clean arm) and therefore exited with code 1 after writing its JSON. Those rows were explicitly
 marked `empty_response_failure`; they were not treated as successful defenses or silently removed.
 
+#### Does poison win retrieval, or does the corpus mix it with the gold passage?
+
+Our undefended ASR falls well short of the paper's ~90%. Two explanations compete: **(A)** the
+2025-era generator (`openai/gpt-oss-20b`) simply refuses the planted answer more than the
+2024-era models the paper tested, even when poison sweeps the top-5, or **(B)** our 10,117-passage
+corpus (vs. the paper's million-passage one) mixes the target's own gold passage into the top-5,
+so the model sees the true answer alongside the false one. `results/poisonedrag_n100_20260914T021958Z.json`
+adds three record-only fields to every per-target row (`n_poison_in_topk`, `n_gold_in_topk`,
+`retrieved_ids`) to tell them apart, with no change to scoring, thresholds, retrieval or prompts.
+
+It's (A). Defense OFF, poison holds all 5 of the top-5 on **98 of 100 targets** (4/5 on the other
+2) — nearly as clean a sweep as the paper's own setup despite the much smaller corpus. Attack
+success on that 5/5 cohort is **62/98 = 63.3%**, barely above the unconditioned rate. The target's
+own gold passage was retrieved at all on only **2 of 100** targets, and the attack failed on both
+(0/2) — gold presence explains at most 2 of the 38 non-successes, nowhere near enough to carry the
+gap to the paper's number. The held-out half shows the same shape: poison sweeps 5/5 on 49 of 50
+targets, attack success on that cohort **27/49 = 55.1%**; the tuning half's cohort is **35/49 =
+71.4%**. Corpus mixing barely happens here — poison out-competes almost everything, gold included —
+so (B) has almost no room to operate. What's left is the generator declining the planted answer
+roughly 4 times in 10 even with a clean 5/5 poisoned context in front of it: one model, one corpus,
+not a claim about every 2025-era model.
+
+Defense ON sharpens the same point rather than muddying it. Of the 98 non-empty-response targets,
+poison survives ingestion + collapse + `context_guard` and reaches the prompt on **10** — the
+attack succeeds on **10/10** of those. On the other **88**, where no poison reaches the prompt,
+ASR is **2/88 = 2.3%** — the substring scorer's noise floor (an answer that happens to contain the
+incorrect string), not a real breach. Ingestion quarantine is doing essentially all of the defended
+arm's work: on this corpus, poison that gets in front of the model wins.
+
+One scoring artifact, documented rather than fixed: clean accuracy moved from 46%/45% (off/on) in
+the archived reference run to 45%/46% here, with **0 live LLM calls** (394/394 served from cache —
+nothing was regenerated). The cause is one target, `test231`: two already-cached answers differ
+only by a U+202F narrow no-break space between "Andrew" and "Garfield", and the paper's own
+`clean_str` (reproduced verbatim above) doesn't normalize that character, so the identical fact
+scores correct in one arm and incorrect in the other depending on which cached variant a run's
+retrieval order happens to select. ASR is unaffected (zero targets flipped success/failure). We
+leave `clean_str` alone — it is the paper's own metric, and changing it would break comparability
+with every number above.
+
 #### Archived 47% defense run
 
 **Superseded by the retuned run above.** This was the corrected measurement at the time, with collapse genuinely active. An earlier run

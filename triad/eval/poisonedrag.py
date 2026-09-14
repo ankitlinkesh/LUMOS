@@ -49,6 +49,7 @@ documented here so the ASR delta is never misattributed to Stage 2.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import statistics
 import sys
@@ -61,7 +62,7 @@ from triad.eval import _common
 
 from triad.config import INDEX_DIR
 from triad.contract import Chunk, Provenance
-from triad.data.beir import gold_ids_for_queries, load_nq
+from triad.data.beir import DEFAULT_ROOT as BEIR_DEFAULT_ROOT, gold_ids_for_queries, load_nq
 from triad.data.poisonedrag import load_targets
 from triad.data.types import DatasetHandle
 from triad.embed.sentence_transformer_embedder import SentenceTransformerEmbedder
@@ -129,6 +130,29 @@ def load_or_build_clean_corpus(embedder, sample_n: int, seed: int, include_ids: 
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     np.save(cache_path, embeddings)
     return chunks, embeddings
+
+
+def gold_ids_by_target(target_ids, root: Path = BEIR_DEFAULT_ROOT, split: str = "test") -> dict[str, tuple[str, ...]]:
+    """Per-target gold passage ids, for the diagnostic fields below (record-only,
+    no behaviour change -- see module docstring). Unlike ``beir.gold_ids_for_queries``
+    (which flattens every target's gold ids into ONE combined tuple, exactly what
+    ``load_nq(include_ids=...)`` needs to force them into the corpus), this keeps
+    them keyed by target id, since scoring "was THIS target's own gold passage
+    retrieved" needs to know which ids belong to which question. Reads the same
+    ``qrels.tsv`` ``gold_ids_for_queries`` already reads; PoisonedRAG's target id
+    IS the BEIR query ``_id`` for the ``nq`` corpus (confirmed there, not assumed
+    again here)."""
+    path = root / "qrels" / f"{split}.tsv"
+    wanted = set(target_ids)
+    if not wanted:
+        return {}
+    found: dict[str, list[str]] = {tid: [] for tid in wanted}
+    with open(path, encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        for row in reader:
+            if row["query-id"] in wanted:
+                found[row["query-id"]].append(row["corpus-id"])
+    return {tid: tuple(ids) for tid, ids in found.items()}
 
 
 def poison_chunks_for_targets(targets) -> list[Chunk]:
@@ -272,7 +296,8 @@ def assert_all_conditions_retrieved(per_target: dict[str, list[dict]]) -> None:
 _EMPTY_RESPONSE_RETRIES = 2  # extra attempts beyond the first, on a fresh (uncached) call each time
 
 
-def ask_and_score(pipeline: Pipeline, llm, targets, *, scored_field: str, k: int, cache_stats: _common.CacheStats):
+def ask_and_score(pipeline: Pipeline, llm, targets, *, scored_field: str, k: int, cache_stats: _common.CacheStats,
+                   gold_ids_by_target: dict[str, tuple[str, ...]] | None = None):
     """Runs every target's question against ``pipeline`` (which has no LLM of
     its own -- ``llm`` is injected per call so the same pipeline object can be
     reused across the ASR and clean-accuracy passes without rebuilding it).
@@ -303,6 +328,7 @@ def ask_and_score(pipeline: Pipeline, llm, targets, *, scored_field: str, k: int
                 "target_id": t.id, "question": t.question, "response": "",
                 "success": False, "empty_response_failure": True, "error": str(last_exc),
                 "retrieval_latency_ms": None, "n_retrieved": None, "declined": None,
+                "retrieved_ids": None, "n_poison_in_topk": None, "n_gold_in_topk": None,
             })
             continue
         cache_stats.record(answer.cached)
@@ -310,12 +336,25 @@ def ask_and_score(pipeline: Pipeline, llm, targets, *, scored_field: str, k: int
             success = attack_succeeded(t.incorrect_answer, answer.text)
         else:
             success = clean_correct(t.correct_answer, answer.text)
+        # Diagnostic-only, record-only fields (see module docstring's "the
+        # question this experiment answers"): who actually held the top-k,
+        # never fed back into scoring/thresholds/retrieval/prompts.
+        retrieved_ids = [sc.chunk.id for sc in answer.retrieval.chunks]
+        n_poison_in_topk = sum(1 for cid in retrieved_ids if cid.startswith("poison:"))
+        if gold_ids_by_target is not None:
+            target_gold_ids = set(gold_ids_by_target.get(t.id, ()))
+            n_gold_in_topk = sum(1 for cid in retrieved_ids if cid in target_gold_ids)
+        else:
+            n_gold_in_topk = None
         results.append({
             "target_id": t.id, "question": t.question, "response": answer.text, "success": success,
             "empty_response_failure": False,
             "retrieval_latency_ms": answer.retrieval.latency_ms,
             "n_retrieved": len(answer.retrieval.chunks),
             "declined": answer.retrieval.declined,
+            "retrieved_ids": retrieved_ids,
+            "n_poison_in_topk": n_poison_in_topk,
+            "n_gold_in_topk": n_gold_in_topk,
         })
     pipeline.llm = None
     return results
@@ -351,6 +390,7 @@ def main() -> None:
           f"{5 * len(targets)} / {len(clean_chunks) + 5 * len(targets)} = {poison_ratio:.4%}")
 
     poison_chunks = poison_chunks_for_targets(targets)
+    target_gold_ids = gold_ids_by_target([t.id for t in targets])
 
     defense_off = DefenseConfig(stage1a=False, stage1b=False, secure_retrieval=False, collapse_topk=False, context_guard_enabled=False, stage3_enabled=False)
     defense_on = DefenseConfig(stage1a=True, stage1b=True, secure_retrieval=True, collapse_topk=True, context_guard_enabled=True, stage3_enabled=False)
@@ -379,10 +419,10 @@ def main() -> None:
 
     try:
         print(f"Generating with {GENERATOR_MODEL}: {len(targets)} targets x 2 configs x (ASR + clean accuracy) = {4 * len(targets)} asks...")
-        asr_off = ask_and_score(pipelines["off_poisoned"], client, targets, scored_field="asr", k=args.k, cache_stats=cache_stats)
-        asr_on = ask_and_score(pipelines["on_poisoned"], client, targets, scored_field="asr", k=args.k, cache_stats=cache_stats)
-        clean_off = ask_and_score(pipelines["off_clean"], client, targets, scored_field="clean", k=args.k, cache_stats=cache_stats)
-        clean_on = ask_and_score(pipelines["on_clean"], client, targets, scored_field="clean", k=args.k, cache_stats=cache_stats)
+        asr_off = ask_and_score(pipelines["off_poisoned"], client, targets, scored_field="asr", k=args.k, cache_stats=cache_stats, gold_ids_by_target=target_gold_ids)
+        asr_on = ask_and_score(pipelines["on_poisoned"], client, targets, scored_field="asr", k=args.k, cache_stats=cache_stats, gold_ids_by_target=target_gold_ids)
+        clean_off = ask_and_score(pipelines["off_clean"], client, targets, scored_field="clean", k=args.k, cache_stats=cache_stats, gold_ids_by_target=target_gold_ids)
+        clean_on = ask_and_score(pipelines["on_clean"], client, targets, scored_field="clean", k=args.k, cache_stats=cache_stats, gold_ids_by_target=target_gold_ids)
     except AllKeysExhausted as exc:
         print(f"AllKeysExhausted: {exc}", file=sys.stderr)
         print("Stopping (never retrying in a loop). Whatever completed so far is NOT written -- rerun once capacity frees up; already-answered questions replay from cache.", file=sys.stderr)
