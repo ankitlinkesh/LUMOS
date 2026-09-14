@@ -427,7 +427,11 @@ the PoisonedRAG ASR eval below) — and it confirms the mechanism does not buy a
 was wired into `Pipeline.ask` but a bug (single-string `embed_query` passed where batch
 `embed_documents` was required) made every call fail closed, so it never fired on the production path
 until that call site was fixed. With it fixed, collapse fires on **30 of 100** defended-attack
-targets (0/100 before the fix), shrinking the retrieved set from 5 chunks to as few as 1. ASR does not
+targets (0/100 before the fix), shrinking the retrieved set from 5 chunks to as few as 1. Those
+counts come from `poisonedrag_n100_20260910T195905Z.json`, the headline run at the time, before the
+ingestion retune. In the current headline run (`224217Z`) collapse fires on only **9 of 100**,
+because ingestion now quarantines 456/500 poison chunks before retrieval ever sees them — which
+makes the finding below stronger, not weaker. ASR does not
 move: of those 30 targets, **18 attacks succeeded before collapse fired and 18 succeed after**. Not
 the same 18: two targets flipped to success (test229, test254) and two flipped to failure (test243,
 test418), so the count is a genuine wash rather than an untouched set. Collapsing five near-identical poison chunks down to one still leaves one poison chunk
